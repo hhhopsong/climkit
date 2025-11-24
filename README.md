@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="docs/logo.png" alt="ClimKit logo" width="200" />
+  <img src="docs/logo.pdf" alt="ClimKit logo" width="200" />
 </p>
 # 📘 ClimKit — A Climate & Geophysical Data Analysis Toolkit
 
