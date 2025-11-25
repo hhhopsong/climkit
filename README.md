@@ -1,9 +1,9 @@
 <p align="center">
   <img src="docs/logo.pdf" alt="ClimKit logo" width="200" />
 </p>
-# 📘 ClimKit — A Climate & Geophysical Data Analysis Toolkit
+# 📘 ClimKit — A Climate Data Analysis Toolkit
 
-**ClimKit** 是一个用于气候数据、地球物理计算及科学绘图的 Python 工具集。它包含多种常用数据处理工具，例如波谱分析、子抽样、温度预算、矢量场可视化、数值拟合等，适用于科研人员、地球科学研究者及数据分析工程师。
+**ClimKit** 是一个用于气候数据及绘图的 Python 工具集。它包含多种常用数据处理工具，例如波谱分析、温度收支、矢量场可视化等，适用于科研人员、地球科学研究者及数据分析工程师。
 
 ---
 
