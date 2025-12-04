@@ -183,6 +183,14 @@ def ersst(data_path, begin_year, end_year):
                              'lon': ersst['lon'].data})
     return ersst
 
+def sic(data_path, begin_year, end_year):
+    sic = xr.open_dataset(data_path)['sic']
+    sic = sic.sel(time=slice(str(begin_year) + '-01-01', str(end_year) + '-12-31'))
+    sic = xr.Dataset({'sic': (['time', 'lat', 'lon'], sic.data)},
+                     coords={'time': sic['time'].data,
+                             'lat': sic['latitude'].data,
+                             'lon': sic['longitude'].data})
+    return sic
 
 if __name__ == '__main__':
     era5_land("E:/data/ERA5/ERA5_land/uv_2mTTd_sfp_pre_0.nc", 1961, 2022, 't2m')

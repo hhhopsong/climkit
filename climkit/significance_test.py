@@ -50,7 +50,7 @@ def normal_test(data, alpha=0.05):
     test = lilliefors(data, dist='norm')[1]
     return test >= alpha, test
 
-def r_test(N, alpha=0.05):
+def r_test(N=None, alpha=0.05):
     """
     :param r: 相关系数
     :param N: 样本量
@@ -62,3 +62,29 @@ def r_test(N, alpha=0.05):
 
     return r_critical
 
+# 有效自由度的计算
+def edof(x, y):
+    """
+    :param x: 时间序列1
+    :param y: 时间序列2
+    :return: 有效自由度
+    """
+    n = len(x)
+    r1 = np.corrcoef(x[:-1], x[1:])[0, 1]
+    r2 = np.corrcoef(y[:-1], y[1:])[0, 1]
+    N_eff = n * (1 - r1 * r2) / (1 + r1 * r2)
+    return N_eff
+
+
+def edof2(x, y):
+    """
+    :param x: 时间序列1
+    :param y: 时间序列2
+    :return: 有效自由度
+    方法来自 https://doi.org/10.1038/s41467-023-44094-1
+    """
+    n = len(x)
+    i1 = 1/n
+    i2 = 2/n * np.sum([(n-i)/n * np.corrcoef(x[:-i], x[i:])[0, 1] * np.corrcoef(y[:-i], y[i:])[0, 1] for i in range(1, n-1)])
+    N_eff = 1 / (i1 + i2)
+    return N_eff
