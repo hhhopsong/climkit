@@ -96,7 +96,89 @@ class VHead(patches.ArrowStyle._Base):
 
         # 返回新的路径和是否可填充的标志
         return Path(all_verts, all_codes), False
+
+class TriHead(patches.ArrowStyle._Base):
+    """
+    等腰三角形箭头样式，腰:底 = 1 : base_ratio (默认 0.618)，
+    顶点在箭头正方向（沿路径末端切线）。
+    """
+
+    def __init__(self, side_length=1.0, base_ratio=0.618):
+        """
+        Parameters
+        ----------
+        side_length : float, default 1.0
+            腰长相对于 mutation_size 的比例因子。
+            实际三角形腰长 = side_length * mutation_size
+
+        base_ratio : float, default 0.618
+            腰:底 = 1 : base_ratio，即底边长度 = base_ratio * 腰长。
+        """
+        self.side_length = side_length
+        self.base_ratio = base_ratio
+
+    def transmute(self, path, mutation_size, linewidth):
+        # 1. 用 path 最后两个点确定箭头方向（终点为箭头顶点）
+        vertices = path.vertices
+        if len(vertices) < 2:
+            # 极端退化情况，给个默认方向
+            x0, y0 = 0.0, 0.0
+            x1, y1 = 1.0, 0.0
+        else:
+            x0, y0 = vertices[-2]
+            x1, y1 = vertices[-1]
+
+        dx, dy = x1 - x0, y1 - y0
+        norm = np.hypot(dx, dy)
+        if norm == 0:
+            ux, uy = 1.0, 0.0
+        else:
+            ux, uy = dx / norm, dy / norm
+
+        # 正交方向（左侧法向量）
+        vx, vy = -uy, ux
+
+        # 2. 计算三角形的几何尺寸
+        # 腰长按照 mutation_size 进行缩放
+        side = self.side_length * mutation_size * 0.5      # 腰长
+        base = self.base_ratio * side                 # 底边长度
+        half_base = base / 2.0
+
+        # 顶点到底边中心沿轴向的距离 L（几何关系：side^2 = L^2 + (base/2)^2）
+        L_sq = max(side * side - half_base * half_base, 0.0)
+        L = np.sqrt(L_sq)
+
+        # 3. 在“局部坐标系”下构造三角形
+        # 局部坐标定义：
+        #   x 轴：沿箭头方向，从尾到头为正方向
+        #   y 轴：指向箭头左侧
+        #   顶点在 (0, 0)
+        tip = np.array([x1, y1], dtype=float)
+        local_apex = np.array([0.0, 0.0], dtype=float)
+        local_left = np.array([-L,  half_base], dtype=float)
+        local_right = np.array([-L, -half_base], dtype=float)
+
+        # 旋转矩阵 R = [u v]，将局部坐标映射到数据坐标
+        R = np.array([[ux, vx],
+                      [uy, vy]], dtype=float)
+
+        apex = tip + R @ local_apex
+        left = tip + R @ local_left
+        right = tip + R @ local_right
+
+        # 4. 生成 Path（封闭三角形）
+        tri_vertices = np.vstack([apex, left, right, apex])
+        tri_codes = [Path.MOVETO,
+                     Path.LINETO,
+                     Path.LINETO,
+                     Path.CLOSEPOLY]
+
+        tri_path = Path(tri_vertices, tri_codes)
+
+        # fillable=True 表示可以填充
+        return tri_path, True
 ArrowStyle._style_list["v"] = VHead
+ArrowStyle._style_list["tri"] = TriHead
 
 
 def lontransform(data, lon_name='lon', type='180->360'):
@@ -186,8 +268,8 @@ class Curlyquiver:
                 是否重新插值网格
             *regrid_reso* : float
                 重新插值网格分辨率
-            *integration_direction* : {'forward', 'backward', 'both'}, default: 'both'
-                矢量向前、向后或双向绘制。
+            *integration_direction* : {'forward', 'backward', 'both', 'stick_forward', 'stick_backward', 'stick_both'}, default: 'both'
+                矢量向前、向后、双向绘制软矢量或者笔直硬矢量。
             *nanmax* : float
                 风速单位一
             *center_lon* : float
@@ -477,7 +559,7 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     v = v * wind_shrink
 
     if regrid_x * regrid_y >= 2000: warnings.warn('流线绘制格点过多，可能导致计算速度过慢!', RuntimeWarning)
-    _api.check_in_list(['both', 'forward', 'backward'], integration_direction=integration_direction)
+    _api.check_in_list(['both', 'forward', 'backward', 'stick_both', 'stick_forward', 'stick_backward'], integration_direction=integration_direction)
     grains = 1
     # 由于对数坐标，在此对对应对数坐标进行处理
     if is_x_log: x = np.log10(x)
@@ -851,49 +933,40 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
         else:
             continue
 
-    if alpha>=.999:
-        lc = mcollections.LineCollection(
-            streamlines, transform=transform, capstyle='round', **line_kw)
-        lc.sticky_edges.x[:] = [grid.x_origin, grid.x_origin + grid.width]
-        lc.sticky_edges.y[:] = [grid.y_origin, grid.y_origin + grid.height]
-        if use_multicolor_lines:
-            lc.set_array(np.ma.hstack(line_colors))
-            lc.set_cmap(cmap)
-            lc.set_norm(norm)
-        axes.add_collection(lc)
-    else:
-        # this part is powered by GPT5
-        # streamlines: list of arrays, 每个 array 是 (N_i, 2) 的坐标点
-        verts, codes = [], []
-        for sl in streamlines:
-            sl = np.asarray(sl)
-            if sl.size == 0:
-                continue
-            verts.append(sl[0])
-            codes.append(Path.MOVETO)
-            verts.extend(sl[1:])
-            codes.extend([Path.LINETO] * (len(sl) - 1))
 
-        path = Path(np.asarray(verts, float), codes)
-        patch = PathPatch(
-            path,
-            facecolor=line_kw.get("color", "C0"),
-            edgecolor=line_kw.get("color", "C0"),
-            lw=line_kw.get("linewidth", 1.0),
-            capstyle='round',
-            joinstyle='round',
-            transform=transform,
-            alpha=alpha
-        )
+    # this part is powered by GPT5
+    # streamlines: list of arrays, 每个 array 是 (N_i, 2) 的坐标点
+    verts, codes = [], []
+    for sl in streamlines:
+        sl = np.asarray(sl)
+        if sl.size == 0:
+            continue
+        verts.append(sl[0])
+        codes.append(Path.MOVETO)
+        verts.extend(sl[1:])
+        codes.extend([Path.LINETO] * (len(sl) - 1))
 
-        patch.sticky_edges.x[:] = [grid.x_origin, grid.x_origin + grid.width]
-        patch.sticky_edges.y[:] = [grid.y_origin, grid.y_origin + grid.height]
-        axes.add_patch(patch)
+    path = Path(np.asarray(verts, float), codes)
+    patch = PathPatch(
+        path,
+        facecolor=line_kw.get("color", "C0"),
+        edgecolor=line_kw.get("color", "C0"),
+        lw=line_kw.get("linewidth", 1.0),
+        capstyle='round',
+        joinstyle='round',
+        transform=transform,
+        alpha=alpha,
+        zorder=line_kw.get("zorder", 1.0)
+    )
+
+    patch.sticky_edges.x[:] = [grid.x_origin, grid.x_origin + grid.width]
+    patch.sticky_edges.y[:] = [grid.y_origin, grid.y_origin + grid.height]
+    axes.add_patch(patch)
 
     axes.autoscale_view()
 
     ac = mcollections.PatchCollection(arrows)
-    stream_container = StreamplotSet(lc, ac) if alpha>=.999 else StreamplotSet(patch, ac)
+    stream_container = StreamplotSet(patch, ac)
     return stream_container, unit, nanmax
 
 	
@@ -1078,7 +1151,7 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
     v_ax = v / dmap.grid.ny
     speed = np.ma.sqrt(u_ax ** 2 + v_ax ** 2)
 
-    if integration_direction == 'both':
+    if integration_direction == 'both' or integration_direction == 'stick_both':
         speed = speed / 2.
 
     def forward_time(xi, yi):
@@ -1104,30 +1177,65 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
         or when it crosses into an already occupied cell in the StreamMask. The
         resulting trajectory is None if it is shorter than `minlength`.
         """
+        def forward_time_stick(xi, yi, x0=x0, y0=y0):
+            ds_dt = interpgrid(speed, xi, yi, axes_scale=axes_scale)
+            if ds_dt == 0:
+                raise TerminateTrajectory()
+            dt_ds = 2. / ds_dt
+            ui = interpgrid(u, x0, y0, axes_scale=axes_scale)
+            vi = interpgrid(v, x0, y0, axes_scale=axes_scale)
+            return ui * dt_ds, vi * dt_ds
+
+        def backward_time_stick(xi, yi):
+            dxi, dyi = forward_time_stick(xi, yi)
+            return -dxi, -dyi
+
 
         stotal, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., [], [], [], [False, False], [False, False]
 
-        
-        dmap.start_trajectory(x0, y0)
+        if integration_direction in ['both', 'backward', 'forward']:
+            dmap.start_trajectory(x0, y0)
 
-        if integration_direction in ['both', 'backward']:
-            stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, resolution, magnitude, axes_scale=[False, False])
-            stotal += stotal_
-            x_traj += x_traj_[::-1]
-            y_traj += y_traj_[::-1]
-            m_total += m_total_[::-1]
-            hit_edge[0] = hit_edge_
-            hit_boundary[0] = hit_boundary
+            if integration_direction in ['both', 'backward']:
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, resolution, magnitude, axes_scale=[False, False])
+                stotal += stotal_
+                x_traj += x_traj_[::-1]
+                y_traj += y_traj_[::-1]
+                m_total += m_total_[::-1]
+                hit_edge[0] = hit_edge_
+                hit_boundary[0] = hit_boundary
 
-        if integration_direction in ['both', 'forward']:
-            dmap.reset_start_point(x0, y0)
-            stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, resolution, magnitude, axes_scale=[False, False])
-            stotal += stotal_
-            x_traj += x_traj_[1:]
-            y_traj += y_traj_[1:]
-            m_total += m_total_[1:]
-            hit_edge[1] = hit_edge_
-            hit_boundary[1] = hit_boundary_
+            if integration_direction in ['both', 'forward']:
+                dmap.reset_start_point(x0, y0)
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, resolution, magnitude, axes_scale=[False, False])
+                stotal += stotal_
+                x_traj += x_traj_[1:]
+                y_traj += y_traj_[1:]
+                m_total += m_total_[1:]
+                hit_edge[1] = hit_edge_
+                hit_boundary[1] = hit_boundary_
+
+        elif integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
+            dmap.start_trajectory(x0, y0)
+
+            if integration_direction in ['stick_both', 'stick_backward']:
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, resolution, magnitude, axes_scale=[False, False])
+                stotal += stotal_
+                x_traj += x_traj_[::-1]
+                y_traj += y_traj_[::-1]
+                m_total += m_total_[::-1]
+                hit_edge[0] = hit_edge_
+                hit_boundary[0] = hit_boundary_
+
+            if integration_direction in ['both', 'forward']:
+                dmap.reset_start_point(x0, y0)
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, resolution, magnitude, axes_scale=[False, False])
+                stotal += stotal_
+                x_traj += x_traj_[1:]
+                y_traj += y_traj_[1:]
+                m_total += m_total_[1:]
+                hit_edge[1] = hit_edge_
+                hit_boundary[1] = hit_boundary_
 
         hit_boundary = True if hit_boundary[1] else False
         hit_edge = True if hit_edge[0] | hit_edge[1] else False
@@ -1423,8 +1531,8 @@ def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
     if ls1.is_empty or ls2.is_empty:
         return 0.0, 0.0
     # Hitbox
-    buf1 = prep(ls1.buffer(threshold, cap_style=2, join_style=2))
-    buf2 = prep(ls2.buffer(threshold, cap_style=2, join_style=2))
+    buf1 = prep(ls1.buffer(threshold, cap_style='round', join_style='round'))
+    buf2 = prep(ls2.buffer(threshold, cap_style='round', join_style='round'))
     # 重叠长度
     inter1_len = ls1.intersection(buf2.context).length
     inter2_len = ls2.intersection(buf1.context).length
@@ -1593,7 +1701,7 @@ def traj_overlap_all(trajs, threshold=0.01, simplify=None, numpy_force=False):
             bufs[j] = None
             preps[j] = None
             continue
-        bufj = ls.buffer(threshold, cap_style=2, join_style=2)
+        bufj = ls.buffer(threshold, cap_style='round', join_style='round')
         bufs[j] = bufj
         preps[j] = prep(bufj)
 
@@ -1685,7 +1793,7 @@ if __name__ == '__main__':
     fig = matplotlib.pyplot.figure(figsize=(10, 5))
     ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(100.5))
     ax1.set_extent([-180, 180, -80, 80], crs=ccrs.PlateCarree())
-    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[0.1, 0.1], arrowstyle='v', thinning=['0%', 'min'], alpha=0.6, zorder=100)
+    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2], arrowstyle='tri', thinning=['0%', 'min'], alpha=0.6, zorder=100, integration_direction='stick_both')
     ax1.contourf(x, y, U, levels=[-1, 0, 1], cmap=plt.cm.PuOr_r, transform=ccrs.PlateCarree(0), extend='both',alpha=0.5, zorder=10)
     ax1.contourf(x, y, V, levels=[-1, 0, 1], cmap=plt.cm.RdBu, transform=ccrs.PlateCarree(0), extend='both',alpha=0.5, zorder=10)
     # ax1.quiver(x, y, U, V, transform=ccrs.PlateCarree(0), regrid_shape=20, scale=25)
