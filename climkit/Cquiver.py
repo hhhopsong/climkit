@@ -3,6 +3,8 @@
 """
 from __future__ import (absolute_import, division, print_function,
                         unicode_literals)
+
+import cartopy
 # 数据处理三方库
 import xarray as xr
 from scipy.interpolate import RegularGridInterpolator
@@ -12,6 +14,7 @@ import numpy as np
 # 绘图三方库
 import cartopy.crs as ccrs
 import cartopy.feature as cfeature
+import pyproj
 import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.collections as mcollections
@@ -22,6 +25,7 @@ from matplotlib import _api, cm, patches
 from matplotlib.streamplot import TerminateTrajectory
 from matplotlib.patches import PathPatch, ArrowStyle
 from matplotlib.path import Path
+from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 from shapely.geometry import LineString
 from shapely.prepared import prep
 from operator import itemgetter
@@ -207,27 +211,40 @@ def lontransform(data, lon_name='lon', type='180->360'):
         raise ValueError('type must be 180->360 or 360->180')
 
 
-def adjust_sub_axes(ax_main, ax_sub, shrink, lr=1.0, ud=1.0, width=1.0, height=1.0):
-    '''
-    将ax_sub调整到ax_main的右下角.shrink指定缩小倍数。
-    当ax_sub是GeoAxes时,需要在其设定好范围后再使用此函数
-    :param ax_main: 主图
-    :param ax_sub: 子图
-    :param shrink: 缩小倍数
-    :param lr: 左右间距(>1：左偏, <1：右偏)
-    :param ud: 上下间距(>1：上偏, <1：下偏)
-    :param width: 宽度缩放比例
-    :param height: 高度比例
-    '''
-    bbox_main = ax_main.get_position()
-    bbox_sub = ax_sub.get_position()
-    wnew = bbox_main.width * shrink * width
-    hnew = bbox_main.height * shrink * height
-    bbox_new = mtransforms.Bbox.from_extents(
-        bbox_main.x1 - lr*wnew, bbox_main.y0 + (ud-1)*hnew,
-        bbox_main.x1 - (lr-1)*wnew, bbox_main.y0 + ud*hnew
-    )
-    ax_sub.set_position(bbox_new)
+# 单位箭头的辅助函数
+# 用于转换不同坐标系投影下的单位长度
+def data_unit_scale(ax, dx=1.0, x0=None, y0=None):
+    """
+    返回 (sx, sy):
+      sx = x方向 每 1 data unit 对应多少像素
+      sy = y方向 每 1 data unit 对应多少像素
+    对非线性/投影(GeoAxes)是“局部尺度”(在 x0,y0 附近)。
+    """
+    if x0 is None or y0 is None:
+        xlim = ax.get_xlim()
+        ylim = ax.get_ylim()
+        x0 = 0.5 * (xlim[0] + xlim[1])
+        y0 = 0.5 * (ylim[0] + ylim[1])
+    _MAP = False
+    try:
+        isinstance(ax.projection, ccrs.Projection)
+        _MAP = True
+    except AttributeError:
+        pass
+
+    if _MAP:
+        pj0 = ax.projection.transform_points(ccrs.PlateCarree(), np.asarray([x0]), np.asarray([y0]))
+        pj1 = ax.projection.transform_points(ccrs.PlateCarree(), np.asarray([x0 + dx]), np.asarray([y0]))
+        transform_dxdy = pyproj.Proj(ax.projection).get_factors(x0, y0)
+        p0 = ax.transData.transform((pj0[0, 0], pj0[0, 1]))
+        p1 = ax.transData.transform((pj1[0, 0], pj1[0, 1]))
+    else:
+        # 对于普通 Axes，直接使用数据坐标转换
+        p0 = ax.transData.transform((x0, y0))
+        p1 = ax.transData.transform((x0 + dx, y0))
+
+    sx = np.hypot(*(p1 - p0)) / dx if not _MAP else np.hypot(*(p1 - p0)) / dx / transform_dxdy[8]
+    return sx
 
 
 class Curlyquiver:
@@ -338,8 +355,8 @@ class Curlyquiver:
                         self.start_points, self.scale, self.regrid, self.regrid_reso, self.integration_direction,
                         self.NanMax, self.center_lon, self.thinning, self.MinDistance, self.alpha)
 
-    def key(self, fig, U=1., shrink=0.15, angle=0., label='1', lr=1., ud=1., fontproperties={'size': 5},
-            width_shrink=1., height_shrink=1., edgecolor='k', arrowsize=None, linewidth=None, color=None):
+    def key(self, U=1., shrink=0.15, angle=0., label='1', lr=1., ud=1., fontproperties={'size': 5},
+            width_shrink=1., height_shrink=1., edgecolor='k', arrowsize=None, linewidth=None, color=None, loc="upper right", bbox_to_anchor=None):
         '''
         曲线矢量图例
         :param fig: 画布总底图
@@ -349,8 +366,8 @@ class Curlyquiver:
         :param angle: 角度
         :param label: 标签
         :param fontproperties: 字体属性
-        :param lr: 左右偏移(>1：左偏, <1：右偏)
-        :param ud: 上下偏移(>1：上偏, <1：下偏)
+        :param loc: 位置
+        :param bbox_to_anchor: 锚点
         :param width_shrink: 宽度缩放比例
         :param height_shrink: 高度缩放比例
         :param edgecolor: 边框颜色
@@ -360,8 +377,8 @@ class Curlyquiver:
         arrowsize = arrowsize if arrowsize is not None else self.arrowsize
         linewidth = linewidth if linewidth is not None else self.linewidth
         color = color if color is not None else self.color
-        velovect_key(fig, self.axes, self.quiver, shrink, U, angle, label, color=color, arrowstyle=self.arrowstyle,
-                     linewidth=linewidth, fontproperties=fontproperties, lr=lr, ud=ud, width_shrink=width_shrink,
+        velovect_key(axes=self.axes, quiver=self.quiver, shrink=shrink, U=U, angle=angle, label=label, color=color, arrowstyle=self.arrowstyle,
+                     linewidth=linewidth, fontproperties=fontproperties, loc=loc, bbox_to_anchor=bbox_to_anchor, width_shrink=width_shrink,
                      height_shrink=height_shrink, arrowsize=arrowsize, edgecolor=edgecolor)
 
 
@@ -418,15 +435,19 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     except:
         pass
 
-    #检验center_lon范围
+    # 判断投影类型
+    if not isinstance(axes.projection, ccrs.PlateCarree):
+        warnings.warn('当前axes投影非PlateCarree，stick箭头类型未适配，谨慎使用!', UserWarning)
+
+    # 检验center_lon范围
     if center_lon < -180 or center_lon > 360:
         raise ValueError('center_lon 的范围必须在-180~360之间。')
     center_lon = center_lon + 360 if center_lon < 0 else center_lon
-
+    center_lon = 0 if not isinstance(axes.projection, ccrs.PlateCarree) else center_lon
 
     # 获取axes范围
     try:
-        extent = axes.get_extent()
+        extent = axes.get_extent(crs=ccrs.PlateCarree())
         extent = np.array(extent)
         extent[0] = extent[0] + center_lon
         extent[1] = extent[1] + center_lon
@@ -614,11 +635,8 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     u = np.ma.masked_invalid(u)
     v = np.ma.masked_invalid(v)
     magnitude = np.ma.sqrt(u**2 + v**2)
-    #magnitude /= np.nanmax(magnitude)
-	
-    resolution = 47666666e-8 # 分辨率(最小可分辨度为47666666e-8)
-    minlength = .9*resolution
-    integrate = get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_direction=integration_direction, axes_scale=[is_x_log, is_y_log])
+
+    integrate = get_integrator(u, v, x, y, dmap, magnitude, integration_direction=integration_direction, axes_scale=[is_x_log, is_y_log], transform=axes.projection)
     trajectories = []
     edges = []
     boundarys = []
@@ -1140,7 +1158,7 @@ class StreamMask(object):
 
 # Integrator definitions
 #========================
-def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_direction='both', axes_scale=[False, False]):
+def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', axes_scale=[False, False], transform=None):
     axes_scale = axes_scale
 
     # rescale velocity onto grid-coordinates for integrations.
@@ -1154,6 +1172,26 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
     if integration_direction == 'both' or integration_direction == 'stick_both':
         speed = speed / 2.
 
+    def transform_times(x_=None, y_=0):
+        _c_lon = transform.proj4_params.get("lon_0", None)
+        delta_y = y_ - int(y_)
+        try:
+            Y = y[int(y_)]*(1-delta_y) + y[int(y_)+1]*delta_y
+        except IndexError:
+            Y = y[int(y_)]
+        if x_ is None:
+            transform_dxdy = pyproj.Proj(transform).get_factors(_c_lon, Y)
+            return transform_dxdy[8], transform_dxdy[11]
+        else:
+            delta_x = x_ - int(x_)
+            try:
+                X = x[int(x_)] * (1 - delta_x) + x[int(x_) + 1] * delta_x
+            except IndexError:
+                X = x[int(x_)] * (1 - delta_x) + (x[0] + 360) * delta_x
+            transform_dxdy = pyproj.Proj(transform).get_factors(X, Y)
+            return transform_dxdy[8], transform_dxdy[9], transform_dxdy[10], transform_dxdy[11], X, Y, transform
+
+
     def forward_time(xi, yi):
         ds_dt = interpgrid(speed, xi, yi, axes_scale=axes_scale)
         if ds_dt == 0:
@@ -1161,7 +1199,13 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
         dt_ds = 1. / ds_dt
         ui = interpgrid(u, xi, yi, axes_scale=axes_scale)
         vi = interpgrid(v, xi, yi, axes_scale=axes_scale)
-        return ui * dt_ds, vi * dt_ds
+        du = ui * dt_ds
+        dv = vi * dt_ds
+        if not isinstance(transform, ccrs.PlateCarree):
+            trs_times = transform_times(None, yi)
+            du /= trs_times[0]
+            dv /= trs_times[1]
+        return du, dv
 
     def backward_time(xi, yi):
         dxi, dyi = forward_time(xi, yi)
@@ -1174,17 +1218,33 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
         grid coordinates.
 
         Integration is terminated when a trajectory reaches a domain boundary
-        or when it crosses into an already occupied cell in the StreamMask. The
-        resulting trajectory is None if it is shorter than `minlength`.
+        or when it crosses into an already occupied cell in the StreamMask.
         """
-        def forward_time_stick(xi, yi, x0=x0, y0=y0):
+        if integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
+            ui = interpgrid(u, x0, y0, axes_scale=axes_scale)
+            vi = interpgrid(v, x0, y0, axes_scale=axes_scale)
+            trs_times_0 = transform_times(x0, y0)
+            trs_times_speed = transform_times(None, y0)
+        else:
+            ui, vi = None, None
+
+        def forward_time_stick(xi, yi, ui=ui, vi=vi):
             ds_dt = interpgrid(speed, xi, yi, axes_scale=axes_scale)
             if ds_dt == 0:
                 raise TerminateTrajectory()
-            dt_ds = 2. / ds_dt
-            ui = interpgrid(u, x0, y0, axes_scale=axes_scale)
-            vi = interpgrid(v, x0, y0, axes_scale=axes_scale)
-            return ui * dt_ds, vi * dt_ds
+            dt_ds = 1. / ds_dt
+            du = ui * dt_ds / abs(trs_times_speed[0])
+            dv = vi * dt_ds / abs(trs_times_speed[1])
+            if not isinstance(transform, ccrs.PlateCarree):
+                trs_times = transform_times(xi, yi)
+                J = np.array([[trs_times[0], trs_times[1]],
+                            [trs_times[2], trs_times[3]]], dtype=float)
+                det = np.linalg.det(J)
+                if abs(det) < 1e-12:  # 近奇异：极区/割线附近等，别硬算
+                    raise TerminateTrajectory()
+                du, dv = trs_times_0[0]*du + trs_times_0[1]*dv, trs_times_0[2]*du + trs_times_0[3]*dv
+                du, dv = np.linalg.solve(J, np.array([du, dv], dtype=float))
+            return du, dv
 
         def backward_time_stick(xi, yi):
             dxi, dyi = forward_time_stick(xi, yi)
@@ -1197,17 +1257,17 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
             dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['both', 'backward']:
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, resolution, magnitude, axes_scale=[False, False])
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False])
                 stotal += stotal_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
                 m_total += m_total_[::-1]
                 hit_edge[0] = hit_edge_
-                hit_boundary[0] = hit_boundary
+                hit_boundary[0] = hit_boundary_
 
             if integration_direction in ['both', 'forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, resolution, magnitude, axes_scale=[False, False])
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False])
                 stotal += stotal_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
@@ -1219,7 +1279,7 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
             dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['stick_both', 'stick_backward']:
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, resolution, magnitude, axes_scale=[False, False])
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False])
                 stotal += stotal_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
@@ -1227,9 +1287,9 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
                 hit_edge[0] = hit_edge_
                 hit_boundary[0] = hit_boundary_
 
-            if integration_direction in ['both', 'forward']:
+            if integration_direction in ['stick_both', 'stick_forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, resolution, magnitude, axes_scale=[False, False])
+                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False])
                 stotal += stotal_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
@@ -1248,7 +1308,7 @@ def get_integrator(u, v, dmap, minlength, resolution, magnitude, integration_dir
 
     return integrate
 
-def _integrate_rk12(x0, y0, dmap, f, resolution, magnitude, axes_scale=[False, False]):
+def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
     """2nd-order Runge-Kutta algorithm with adaptive step size.
 
     This method is also referred to as the improved Euler's method, or Heun's
@@ -1335,8 +1395,8 @@ def _integrate_rk12(x0, y0, dmap, f, resolution, magnitude, axes_scale=[False, F
             xi += dx2
             yi += dy2
             
-            if (stotal + ds) > resolution*np.mean(m_total):
-                s_remaining = resolution*np.mean(m_total) - stotal
+            if (stotal + ds) > np.mean(m_total):
+                s_remaining = np.mean(m_total) - stotal
                 fraction = s_remaining / ds
                 if fraction < 0:
                     break  # 防止出现负值导致负步长
@@ -1730,11 +1790,10 @@ def traj_overlap_all(trajs, threshold=0.01, simplify=None, numpy_force=False):
     return P
 
 
-def velovect_key(fig, axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='->', linewidth=.5,
-                 fontproperties={'size': 5}, lr=1., ud=1., width_shrink=1., height_shrink=1., arrowsize=1., edgecolor='k'):
+def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='v', linewidth=.5,
+                 fontproperties={'size': 5}, loc="upper right", bbox_to_anchor=None, width_shrink=1., height_shrink=1., arrowsize=1., edgecolor='k'):
     '''
     曲线矢量图例
-    :param fig: 画布总底图
     :param axes: 目标图层
     :param quiver: 曲线矢量图层
     :param X: 图例横坐标
@@ -1746,31 +1805,44 @@ def velovect_key(fig, axes, quiver, shrink=0.15, U=1., angle=0., label='1', colo
     :param arrowstyle: 箭头样式
     :param linewidth: 线宽
     :param fontproperties: 字体属性
-    :param lr: 左右偏移(>1：左偏, <1：右偏)
-    :param ud: 上下偏移(>1：上偏, <1：下偏)
+    :param loc: 位置
+    :param bbox_to_anchor: 锚点位置
     :param width_shrink: 宽度缩放比例
     :param height_shrink: 高度缩放比例
 
     :return: None
     '''
-    axes_sub = fig.add_axes([0, 0, 1, 1])
-    adjust_sub_axes(axes, axes_sub, shrink=shrink, lr=lr, ud=ud, width=width_shrink, height=height_shrink)
+    if bbox_to_anchor is not None:
+        axes_sub = inset_axes(
+                    axes,
+                    width=f"{shrink*100*width_shrink}%", height=f"{shrink*100*height_shrink}%",
+                    loc=loc,
+                    bbox_to_anchor=bbox_to_anchor,  # 在主图axes区域内定位
+                    borderpad=0.0)
+    else:
+        axes_sub = inset_axes(
+                    axes,
+                    width=f"{shrink*100*width_shrink}%", height=f"{shrink*100*height_shrink}%",
+                    loc=loc,
+                    borderpad=0.0,
+        )
     # 不显示刻度和刻度标签
     axes_sub.set_xticks([])
     axes_sub.set_yticks([])
     axes_sub.set_xlim(-1, 1)
     axes_sub.set_ylim(-2, 1)
+    axes_scale = data_unit_scale(axes, 1e-3, axes.projection.proj4_params.get("lon_0", None), 0)
     for spine in axes_sub.spines.values():
         spine.set_edgecolor(edgecolor)
     dt_ds = quiver[1]
     if np.isnan(dt_ds):
         return
-    U_trans = U * dt_ds / shrink / 2
+    U_trans = U * dt_ds * axes_scale / shrink / 2
     # 绘制图例
-    x, y = U_trans * np.cos(angle) * 2. / width_shrink, U_trans * np.sin(angle) * 3. / height_shrink
+    x, y = U_trans * np.cos(angle) / width_shrink, U_trans * np.sin(angle) / height_shrink
     arrow = patches.FancyArrowPatch(
-    (x-(1e-1)*np.cos(angle), y-(1e-1)*np.sin(angle)), (x, y)
-              , arrowstyle=arrowstyle, mutation_scale=10 * arrowsize, linewidth=linewidth, color=color)
+    (x, y), (x+(1e-9)*np.cos(angle), y+(1e-9)*np.sin(angle))
+              , arrowstyle=arrowstyle, mutation_scale=arrowsize/shrink/2, linewidth=linewidth, color=color)
     axes_sub.add_patch(arrow)
     lines = [[[-x, y], [x, -y]]]
     lc = mcollections.LineCollection(lines, capstyle='round', linewidth=linewidth, color=color)
@@ -1779,26 +1851,39 @@ def velovect_key(fig, axes, quiver, shrink=0.15, U=1., angle=0., label='1', colo
 
 if __name__ == '__main__':
     "test"
+    import matplotlib.path as mpath
+
     x = np.linspace(-180, 180, 361*5)
     y = np.linspace(-90, 90, 180*5)
     Y, X = np.meshgrid(y, x)
 
-    U = np.linspace(-1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
-    V = np.linspace(1, -1, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
+    U = np.linspace(1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
+    V = np.linspace(0, 0, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
     speed = np.where((U**2 + V**2)< 0.2, True, False)
     # 创建掩码UV
     U = np.ma.array(U, mask=speed)
     V = np.ma.array(V, mask=speed)
     #####
-    fig = matplotlib.pyplot.figure(figsize=(10, 5))
-    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(100.5))
-    ax1.set_extent([-180, 180, -80, 80], crs=ccrs.PlateCarree())
-    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2], arrowstyle='tri', thinning=['0%', 'min'], alpha=0.6, zorder=100, integration_direction='stick_both')
-    ax1.contourf(x, y, U, levels=[-1, 0, 1], cmap=plt.cm.PuOr_r, transform=ccrs.PlateCarree(0), extend='both',alpha=0.5, zorder=10)
-    ax1.contourf(x, y, V, levels=[-1, 0, 1], cmap=plt.cm.RdBu, transform=ccrs.PlateCarree(0), extend='both',alpha=0.5, zorder=10)
+    fig = matplotlib.pyplot.figure(figsize=(10, 10))
+    ax1 = fig.add_subplot(121, projection=ccrs.NorthPolarStereo(100.5))
+    ax1.set_extent([-180, 180, 30, 90], crs=ccrs.PlateCarree())
+    # 设置圆形边界
+    theta = np.linspace(0, 2 * np.pi, 200)  # 圆周的采样点
+    center = [0.5, 0.5]  # 以 Axes 中心为圆心（单位是 Axes 坐标 0~1）
+    radius = 0.5  # 半径占整个 Axes 的 0.5
+
+    verts = np.vstack([np.sin(theta), np.cos(theta)]).T  # 单位圆上的点
+    circle = mpath.Path(verts * radius + center)  # 缩放+平移到中心
+
+    # 用 Axes 坐标做 transform，这样就是一个规整的圆
+    ax1.set_boundary(circle, transform=ax1.transAxes)
+
+    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2], arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='forward', transform=ccrs.PlateCarree())
+    ax1.contourf(x, y, U, levels=[-1, 0, 1], cmap=plt.cm.PuOr_r, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
+    ax1.contourf(x, y, V, levels=[-1, 0, 1], cmap=plt.cm.RdBu, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
     # ax1.quiver(x, y, U, V, transform=ccrs.PlateCarree(0), regrid_shape=20, scale=25)
-    a1.key(fig, shrink=0.15)
-    ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.2)
+    a1.key(shrink=0.15)
+    ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
 
     for artist in ax1.get_children():
         # 强制开启裁剪
