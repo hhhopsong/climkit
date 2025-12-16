@@ -723,6 +723,7 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
         return integrate(xg, yg)
 
     traj_length = []
+    D = []
     with alive_bar(len(sp2), title='路径积分', bar='smooth', spinner='dots', force_tty=True) as bar:
         for xs, ys in sp2:
             xg, yg = dmap.data2grid(xs, ys)
@@ -737,12 +738,19 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
             if t is not None:
                 trajectories.append(t[0])
                 edges.append(t[1])
-                boundarys.append(t[4])
-                D = distance(t[0][0], t[0][1]) if ~np.isnan(distance(t[0][0], t[0][1])) else 0
-                traj_length.append(D)
+                traj_length.append(t[2])
+                boundarys.append(t[3])
+                D.append(t[4])
             bar()
 
     # 稀疏化
+    D = np.ma.masked_array(D, mask=boundarys)
+    dsdx = traj_length / D / wind_shrink
+    if np.nanmax(dsdx) - np.nanmin(dsdx) < 1e-5:
+        dsdx = np.nanmean(dsdx) / 2 if integration_direction in ['both', 'stick_both'] else np.nanmedian(dsdx)
+    else:
+        warnings.warn('请注意：矢量单位长度测算可能有误', UserWarning)
+        dsdx = np.nanmean(dsdx) / 2 if integration_direction in ['both', 'stick_both'] else np.nanmedian(dsdx)
     combined = list(zip(traj_length, trajectories, edges, boundarys))
     combined.sort(key=itemgetter(0), reverse=True)  # 按第 0 个元素（traj_length）降序
     traj_length, trajectories, edges, boundarys = map(list, zip(*combined))
@@ -985,7 +993,7 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
 
     ac = mcollections.PatchCollection(arrows)
     stream_container = StreamplotSet(patch, ac)
-    return stream_container, unit, nanmax
+    return stream_container, unit, nanmax, dsdx
 
 	
 class StreamplotSet(object):
@@ -1169,7 +1177,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
     v_ax = v / dmap.grid.ny
     speed = np.ma.sqrt(u_ax ** 2 + v_ax ** 2)
 
-    if integration_direction == 'both' or integration_direction == 'stick_both':
+    if integration_direction in ['both', 'stick_both']:
         speed = speed / 2.
 
     def transform_times(x_=None, y_=0):
@@ -1201,15 +1209,18 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         vi = interpgrid(v, xi, yi, axes_scale=axes_scale)
         du = ui * dt_ds
         dv = vi * dt_ds
+        _du, _dv = du, dv
         if not isinstance(transform, ccrs.PlateCarree):
             trs_times = transform_times(None, yi)
             du /= trs_times[0]
             dv /= trs_times[1]
-        return du, dv
+        else:
+            trs_times = [1, 1]
+        return du, dv, trs_times[0], trs_times[1]
 
     def backward_time(xi, yi):
-        dxi, dyi = forward_time(xi, yi)
-        return -dxi, -dyi
+        dxi, dyi, trs_times0, trs_times1 = forward_time(xi, yi)
+        return -dxi, -dyi, trs_times0, trs_times1
 
     def integrate(x0, y0):
         """Return x, y grid-coordinates of trajectory based on starting point.
@@ -1233,45 +1244,47 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             if ds_dt == 0:
                 raise TerminateTrajectory()
             dt_ds = 1. / ds_dt
-            du = ui * dt_ds / abs(trs_times_speed[0])
-            dv = vi * dt_ds / abs(trs_times_speed[1])
+            du = ui * dt_ds
+            dv = vi * dt_ds
+            du /= abs(trs_times_speed[0])
+            dv /= abs(trs_times_speed[1])
             if not isinstance(transform, ccrs.PlateCarree):
                 trs_times = transform_times(xi, yi)
                 J = np.array([[trs_times[0], trs_times[1]],
                             [trs_times[2], trs_times[3]]], dtype=float)
                 det = np.linalg.det(J)
-                if abs(det) < 1e-12:  # 近奇异：极区/割线附近等，别硬算
+                if abs(det) < 1e-12:
                     raise TerminateTrajectory()
                 du, dv = trs_times_0[0]*du + trs_times_0[1]*dv, trs_times_0[2]*du + trs_times_0[3]*dv
                 du, dv = np.linalg.solve(J, np.array([du, dv], dtype=float))
-            return du, dv
+            return du, dv, trs_times_speed[0], trs_times_speed[1]
 
         def backward_time_stick(xi, yi):
-            dxi, dyi = forward_time_stick(xi, yi)
-            return -dxi, -dyi
+            dxi, dyi, trs_times0, trs_times1 = forward_time_stick(xi, yi)
+            return -dxi, -dyi, trs_times0, trs_times1
 
 
-        stotal, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., [], [], [], [False, False], [False, False]
+        stotal, D, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., 0., [], [], [], [False, False], [False, False]
 
         if integration_direction in ['both', 'backward', 'forward']:
             dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['both', 'backward']:
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False])
                 stotal += stotal_
+                D += D_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
-                m_total += m_total_[::-1]
                 hit_edge[0] = hit_edge_
                 hit_boundary[0] = hit_boundary_
 
             if integration_direction in ['both', 'forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False])
                 stotal += stotal_
+                D += D_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
-                m_total += m_total_[1:]
                 hit_edge[1] = hit_edge_
                 hit_boundary[1] = hit_boundary_
 
@@ -1279,32 +1292,32 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['stick_both', 'stick_backward']:
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False])
                 stotal += stotal_
+                D += D_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
-                m_total += m_total_[::-1]
                 hit_edge[0] = hit_edge_
                 hit_boundary[0] = hit_boundary_
 
             if integration_direction in ['stick_both', 'stick_forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, m_total_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False])
                 stotal += stotal_
+                D += D_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
-                m_total += m_total_[1:]
                 hit_edge[1] = hit_edge_
                 hit_boundary[1] = hit_boundary_
 
-        hit_boundary = True if hit_boundary[1] else False
+        hit_boundary = True if hit_boundary[0] | hit_boundary[1] else False
         hit_edge = True if hit_edge[0] | hit_edge[1] else False
 
         if len(x_traj)>1 and not hit_edge:
-            return (x_traj, y_traj), hit_edge, m_total, stotal, hit_boundary
+            return (x_traj, y_traj), hit_edge, stotal, hit_boundary, D
         else:  # reject short trajectories
             dmap.undo_trajectory()
-            return (None, None), hit_edge, m_total, stotal, hit_boundary
+            return (None, None), hit_edge, stotal, hit_boundary, D
 
     return integrate
 
@@ -1346,11 +1359,12 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
 
     ds = maxds
     stotal = 0
+    D = 0
     xi = x0
     yi = y0
     xf_traj = []
     yf_traj = []
-    m_total = []
+    m_total = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
     hit_edge = False
     hit_boundary = False
 
@@ -1360,21 +1374,22 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
         xf_traj.append(xi)
         yf_traj.append(yi)
         try:
-            m_total.append(interpgrid(magnitude, xi, yi, axes_scale=axes_scale))
+            interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
         except TerminateTrajectory:
             hit_edge = True
             break
 
         try:
-            k1x, k1y = f(xi, yi)
-            k2x, k2y = f(xi + ds * k1x,
-                         yi + ds * k1y)
+            k1x, k1y, trs_x, trs_y = f(xi, yi)
+            k2x, k2y, trs_x, trs_y = f(xi + ds * k1x,
+                                       yi + ds * k1y)
         except IndexError:
             # Out of the domain on one of the intermediate integration steps.
             # Take an Euler step to the boundary to improve neatness.
             # 在其中一个中间集成步骤中脱离域。向边界迈出欧拉步以提高整洁度。
-            ds, xf_traj, yf_traj = _euler_step(xf_traj, yf_traj, dmap, f)
+            ds, xf_traj, yf_traj, dx2, dy2 = _euler_step(xf_traj, yf_traj, dmap, f)
             stotal += ds
+            D += np.sqrt((np.array(dmap.grid2data(dx2, dy2))**2).sum())
             hit_edge = True
             break
         except TerminateTrajectory:
@@ -1394,9 +1409,8 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
         if error < maxerror:
             xi += dx2
             yi += dy2
-            
-            if (stotal + ds) > np.mean(m_total):
-                s_remaining = np.mean(m_total) - stotal
+            if (stotal + ds) > m_total:
+                s_remaining = m_total - stotal
                 fraction = s_remaining / ds
                 if fraction < 0:
                     break  # 防止出现负值导致负步长
@@ -1404,16 +1418,15 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
                 xi += dx2 * (fraction-1)
                 yi += dy2 * (fraction-1)
                 dmap.update_trajectory(xi, yi)
-                # 将总长度精确地更新到目标值
                 stotal += s_remaining
-                # 将这个精确的终点加入轨迹
+                D += np.sqrt((np.array(dmap.grid2data((dx2 * trs_x) * (fraction - 1), (dy2 * trs_y) * (fraction - 1))) ** 2).sum())
                 xf_traj.append(xi)
                 yf_traj.append(yi)
-                m_total.append(interpgrid(magnitude, xi, yi, axes_scale=axes_scale))
                 break
 
             dmap.update_trajectory(xi, yi)
             stotal += ds
+            D += np.sqrt((np.array(dmap.grid2data(dx2 * trs_x, dy2 * trs_y)) ** 2).sum())
 
         # recalculate stepsize based on step error
         if error == 0:
@@ -1424,7 +1437,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
     if not dmap.grid.within_grid(xi, yi):
         hit_boundary = True  # 碰到数据边界
 
-    return stotal, xf_traj, yf_traj, m_total, hit_edge, hit_boundary
+    return stotal, D, xf_traj, yf_traj, hit_edge, hit_boundary
 
 
 def _euler_step(xf_traj, yf_traj, dmap, f):
@@ -1432,7 +1445,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     ny, nx = dmap.grid.shape
     xi = xf_traj[-1]
     yi = yf_traj[-1]
-    cx, cy = f(xi, yi)
+    cx, cy, trs_x, trs_y = f(xi, yi)
     if cx == 0:
         dsx = np.inf
     elif cx < 0:
@@ -1448,7 +1461,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     ds = min(dsx, dsy)
     xf_traj.append(xi + cx * ds)
     yf_traj.append(yi + cy * ds)
-    return ds, xf_traj, yf_traj
+    return ds, xf_traj, yf_traj, cx * ds * trs_x, cy * ds * trs_y
 
 
 def interpgrid(a, xi, yi, axes_scale=[False, False]):
@@ -1520,22 +1533,6 @@ def _gen_starting_points(x,y,grains):
     seed_points = np.array([list(xs), list(ys)])
     
     return seed_points.T
-
-
-def distance(x, y):
-    """Calculate the sum_distance between some points."""
-    if len(x) != len(y):
-        raise ValueError("x and y must have the same length")
-
-    if len(x) < 2:
-        return None
-
-    x = np.asarray(x)
-    y = np.asarray(y)
-    dx = np.diff(x)
-    dy = np.diff(y)
-
-    return np.sqrt(dx**2 + dy**2).sum()
 
 def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
     """
@@ -1831,18 +1828,23 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     axes_sub.set_yticks([])
     axes_sub.set_xlim(-1, 1)
     axes_sub.set_ylim(-2, 1)
-    axes_scale = data_unit_scale(axes, 1e-3, axes.projection.proj4_params.get("lon_0", None), 0)
     for spine in axes_sub.spines.values():
         spine.set_edgecolor(edgecolor)
-    dt_ds = quiver[1]
-    if np.isnan(dt_ds):
-        return
-    U_trans = U * dt_ds * axes_scale / shrink / 2
+    ds_dx = quiver[3]
+    try:
+        extent = axes.get_extent(crs=ccrs.PlateCarree())
+        extent = np.array(extent)
+        ax_times = (axes_sub.get_xlim()[1] - axes_sub.get_xlim()[0]) / (extent[1] - extent[0])
+    except AttributeError:
+        ax_times = (axes_sub.get_xlim()[1] - axes_sub.get_xlim()[0]) / (axes.get_xlim()[1] - axes.get_xlim()[0])
+    axes_scale = data_unit_scale(axes, 1e-3, axes.projection.proj4_params.get("lon_0", None), 0)
+    axes_axis_scale = data_unit_scale(axes_sub, 1e-3, 0, 0) * ax_times
+    U_trans = U / ds_dx * (axes_scale / axes_axis_scale) * ax_times / shrink / 2
     # 绘制图例
     x, y = U_trans * np.cos(angle) / width_shrink, U_trans * np.sin(angle) / height_shrink
     arrow = patches.FancyArrowPatch(
     (x, y), (x+(1e-9)*np.cos(angle), y+(1e-9)*np.sin(angle))
-              , arrowstyle=arrowstyle, mutation_scale=arrowsize/shrink/2, linewidth=linewidth, color=color)
+              , arrowstyle=arrowstyle, mutation_scale=arrowsize, linewidth=linewidth, color=color)
     axes_sub.add_patch(arrow)
     lines = [[[-x, y], [x, -y]]]
     lc = mcollections.LineCollection(lines, capstyle='round', linewidth=linewidth, color=color)
@@ -1865,27 +1867,16 @@ if __name__ == '__main__':
     V = np.ma.array(V, mask=speed)
     #####
     fig = matplotlib.pyplot.figure(figsize=(10, 10))
-    ax1 = fig.add_subplot(121, projection=ccrs.NorthPolarStereo(100.5))
+    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(100.5))
     ax1.set_extent([-180, 180, 30, 90], crs=ccrs.PlateCarree())
-    # 设置圆形边界
-    theta = np.linspace(0, 2 * np.pi, 200)  # 圆周的采样点
-    center = [0.5, 0.5]  # 以 Axes 中心为圆心（单位是 Axes 坐标 0~1）
-    radius = 0.5  # 半径占整个 Axes 的 0.5
 
-    verts = np.vstack([np.sin(theta), np.cos(theta)]).T  # 单位圆上的点
-    circle = mpath.Path(verts * radius + center)  # 缩放+平移到中心
 
-    # 用 Axes 坐标做 transform，这样就是一个规整的圆
-    ax1.set_boundary(circle, transform=ax1.transAxes)
-
-    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2], arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='forward', transform=ccrs.PlateCarree())
+    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=30, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2],
+                     arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='stick_both', transform=ccrs.PlateCarree())
     ax1.contourf(x, y, U, levels=[-1, 0, 1], cmap=plt.cm.PuOr_r, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
     ax1.contourf(x, y, V, levels=[-1, 0, 1], cmap=plt.cm.RdBu, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
     # ax1.quiver(x, y, U, V, transform=ccrs.PlateCarree(0), regrid_shape=20, scale=25)
-    a1.key(shrink=0.15)
+    a1.key(shrink=0.25)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
 
-    for artist in ax1.get_children():
-        # 强制开启裁剪
-        artist.set_clip_on(True)
     plt.show()
