@@ -26,6 +26,7 @@ from matplotlib.streamplot import TerminateTrajectory
 from matplotlib.patches import PathPatch, ArrowStyle
 from matplotlib.path import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+import shapely
 from shapely.geometry import LineString
 from shapely.prepared import prep
 from operator import itemgetter
@@ -251,7 +252,7 @@ class Curlyquiver:
     def __init__(self, ax, x, y, U, V, lon_trunc=None, linewidth=.5, color='black', cmap=None, norm=None, arrowsize=.5,
                  arrowstyle='v', transform=None, zorder=None, start_points='interleaved', scale=1., regrid=30,
                  regrid_reso=2.5, integration_direction='both', nanmax=None, center_lon=180., alpha=1.,
-                 thinning=['0%', 'min'], MinDistance=[0, 1]):
+                 thinning=['0%', 'min'], MinDistance=[0., 1.]):
         """绘制矢量曲线.
 
             *x*, *y* : 1d arrays
@@ -327,7 +328,6 @@ class Curlyquiver:
         self.y = y
         self.U = U
         self.V = V
-        self.lon_trunc = lon_trunc if lon_trunc is not None else center_lon - 180.
         self.linewidth = linewidth
         self.color = color
         self.cmap = cmap
@@ -350,7 +350,7 @@ class Curlyquiver:
         self.quiver = self.quiver()
         self.nanmax = self.quiver[2]
     def quiver(self):
-        return velovect(self.axes, self.x, self.y, self.U, self.V, self.lon_trunc, self.linewidth, self.color,
+        return velovect(self.axes, self.x, self.y, self.U, self.V, self.linewidth, self.color,
                         self.cmap, self.norm, self.arrowsize, self.arrowstyle, self.transform, self.zorder,
                         self.start_points, self.scale, self.regrid, self.regrid_reso, self.integration_direction,
                         self.NanMax, self.center_lon, self.thinning, self.MinDistance, self.alpha)
@@ -382,7 +382,7 @@ class Curlyquiver:
                      height_shrink=height_shrink, arrowsize=arrowsize, edgecolor=edgecolor)
 
 
-def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
+def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                cmap=None,      norm=None,    arrowsize=.5,    arrowstyle='v',
                transform=None, zorder=None,  start_points= 'interleaved',
                scale=100.,     regrid=30,    regrid_reso=2.5, integration_direction='both',
@@ -435,9 +435,6 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     except:
         pass
 
-    # 判断投影类型
-    if not isinstance(axes.projection, ccrs.PlateCarree):
-        warnings.warn('当前axes投影非PlateCarree，stick箭头类型未适配，谨慎使用!', UserWarning)
 
     # 检验center_lon范围
     if center_lon < -180 or center_lon > 360:
@@ -595,6 +592,9 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     # default to data coordinates
     if transform is None:
         transform = axes.transData
+    elif isinstance(transform, ccrs.Projection):
+        # 将中心经度设为center_lon
+        transform = ccrs.PlateCarree(central_longitude=center_lon)
 
     if color is None:
         color = axes._get_lines.get_next_color()
@@ -659,30 +659,36 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
     if not is_x_log and not is_y_log:
         # 只有在两个轴都是线性时才应用原来的逻辑
         if MAP:
-            x_draw_delta = np.linspace(extent[0], extent[1], regrid_x, retstep=True)[1]
-            y_draw_delta = np.linspace(extent[2], extent[3], regrid_y, retstep=True)[1]
+            x_draw_delta = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], regrid_x, retstep=True)[1]
+            y_draw_delta = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], regrid_y, retstep=True)[1]
+            MinDistance[0] *= x_draw_delta
             if REGRID_LEN == 2:
-                x_draw = np.arange(extent[0] - center_lon + x_draw_delta / 2, extent[1] - center_lon, x_draw_delta)
-                y_draw = np.arange(extent[2] + y_draw_delta / 2, extent[3], y_draw_delta)
+                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
+                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
             elif x_draw_delta < y_draw_delta:
-                x_draw = np.arange(extent[0] - center_lon + x_draw_delta / 2, extent[1] - center_lon, x_draw_delta)
-                y_draw = np.arange(extent[2] + x_draw_delta / 2, extent[3], x_draw_delta)
+                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
+                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], x_draw_delta)
             else:
-                x_draw = np.arange(extent[0] - center_lon + y_draw_delta / 2, extent[1] - center_lon, y_draw_delta)
-                y_draw = np.arange(extent[2] + y_draw_delta / 2, extent[3], y_draw_delta)
+                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], y_draw_delta)
+                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
         else:
             x_draw = x
             y_draw = y
+            MinDistance[0] *= x[1] - x[0]
 
     # 处理超出-180~180范围的经度
-    if MAP:
-        x_draw = np.where(x_draw > 180, x_draw - 360, x_draw)
-        x_draw = np.where(x_draw < -180, x_draw + 360, x_draw)
+    # if MAP:
+    #     x_draw = np.where(x_draw > 180, x_draw - 360, x_draw)
+    #     x_draw = np.where(x_draw < -180, x_draw + 360, x_draw)
 
     if start_points is None:
         if regrid:
             X_re, Y_re = np.meshgrid(x_draw, y_draw)
             start_points = np.array([X_re.flatten(), Y_re.flatten()]).T
+            start_points_trs = pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(start_points[:, 0], start_points[:, 1])
+            start_points[:, 1] = start_points_trs[1]
+            start_points[:, 0] = start_points_trs[0]
+            del start_points_trs
         else:
             start_points=_gen_starting_points(x,y,grains)
     elif start_points == 'interleaved':
@@ -696,12 +702,17 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
                 X_re = X_re[mask_]
                 Y_re = Y_re[mask_]
             start_points = np.array([X_re.flatten(), Y_re.flatten()]).T
+            start_points_trs = pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(start_points[:, 0], start_points[:, 1])
+            start_points[:, 1] = start_points_trs[1]
+            start_points[:, 0] = start_points_trs[0]
+            del start_points_trs
         else:
             warnings.warn('绘制点未成功插值为六边形: start_points 为 "interleaved" 时, regrid 的值必须非 False', UserWarning)
             start_points=_gen_starting_points(x,y,grains)
 
 
     sp2 = np.asanyarray(start_points, dtype=float).copy()
+    sp2_mask = np.full(sp2.shape[0], False)
     # 检查start_points是否在数据边界之外
     for xs, ys in sp2:
         if not (grid.x_origin <= xs <= grid.x_origin + grid.width
@@ -710,7 +721,9 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
                     or np.abs(ys - grid.y_origin) < 1e-8 or np.abs(ys - grid.y_origin - grid.height) < 1e-8):
                 warnings.warn(f"起绘点 ({xs}, {ys}) 位于数据边界上，可能会导致路径积分失败。", UserWarning)
             else:
-                raise ValueError("起绘点 ({}, {}) 超出数据边界".format(xs, ys))
+                warnings.warn("起绘点 ({}, {}) 超出数据边界, 已将其删除".format(xs, ys), UserWarning)
+                sp2_mask[np.where((sp2[:, 0] == xs) & (sp2[:, 1] == ys))[0][0]] = True
+    sp2 = sp2[~sp2_mask]
 
     # Convert start_points from data to array coords
     # Shift the seed points from the bottom left of the data so that
@@ -797,13 +810,18 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
         traj_length = traj_length[index0:index1]
         boundarys = boundarys[index0:index1]
 
+
     if MinDistance[0] > 0 and MinDistance[1] < 1:
+        _trajectories = trajectories.copy()
+        for i in range(len(trajectories)):
+            _t_ = dmap.grid2data(*np.array(_trajectories[i]))
+            _trajectories[i] = pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True).transform(_t_[0], _t_[1])
         distance_limit_tlen = []
         distance_limit_traj = []
         distance_limit_edges = []
         distance_limit_boundarys = []
         try:
-            dictance_matrix = traj_overlap_all(trajectories, MinDistance[0])
+            dictance_matrix = traj_overlap_all(_trajectories, MinDistance[0])
             distance_limit_index = []
             with alive_bar(len(trajectories), title='疏离化', bar='smooth', spinner='triangles', force_tty=True) as bar:
                 for i in range(len(trajectories)):
@@ -830,6 +848,7 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
                             distance_limit_index.append(i)
                     bar()
         except:
+            distance_limit_traj_trs = []
             warnings.warn("加速计算失败,请耐心等候...")
             with alive_bar(len(trajectories), title='疏离化', bar='smooth', spinner='dots', force_tty=True) as bar:
                 for i in range(len(trajectories)):
@@ -840,10 +859,11 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
                         distance_limit_traj.append(trajectories[i])
                         distance_limit_edges.append(edges[i])
                         distance_limit_boundarys.append(boundarys[i])
+                        distance_limit_traj_trs.append(_trajectories[i])
                     else:
                         add_signl = True
-                        for i_in in range(len(distance_limit_traj)):
-                            too_close_percent = traj_overlap(trajectories[i], distance_limit_traj[i_in], MinDistance[0])[0]
+                        for i_in in range(len(distance_limit_traj_trs)):
+                            too_close_percent = traj_overlap(_trajectories[i], distance_limit_traj_trs[i_in], MinDistance[0])[0]
                             if too_close_percent >= MinDistance[1]:
                                 add_signl = False
                                 break
@@ -852,6 +872,7 @@ def velovect(axes, x, y, u, v, lon_trunc=0., linewidth=.5,    color='black',
                             distance_limit_traj.append(trajectories[i])
                             distance_limit_edges.append(edges[i])
                             distance_limit_boundarys.append(boundarys[i])
+                            distance_limit_traj_trs.append(_trajectories[i])
                     bar()
         traj_length, trajectories, edges, boundarys = distance_limit_tlen, distance_limit_traj, distance_limit_edges, distance_limit_boundarys
 
@@ -1201,12 +1222,12 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
 
     def forward_time(xi, yi):
-        ds_dt = interpgrid(speed, xi, yi, axes_scale=axes_scale)
+        ds_dt, _1 = interpgrid(speed, xi, yi, axes_scale=axes_scale)
         if ds_dt == 0:
             raise TerminateTrajectory()
         dt_ds = 1. / ds_dt
-        ui = interpgrid(u, xi, yi, axes_scale=axes_scale)
-        vi = interpgrid(v, xi, yi, axes_scale=axes_scale)
+        ui, _2 = interpgrid(u, xi, yi, axes_scale=axes_scale)
+        vi, _3 = interpgrid(v, xi, yi, axes_scale=axes_scale)
         du = ui * dt_ds
         dv = vi * dt_ds
         _du, _dv = du, dv
@@ -1216,11 +1237,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             dv /= trs_times[1]
         else:
             trs_times = [1, 1]
-        return du, dv, trs_times[0], trs_times[1]
+        return du, dv, trs_times[0], trs_times[1], _1|_2|_3
 
     def backward_time(xi, yi):
-        dxi, dyi, trs_times0, trs_times1 = forward_time(xi, yi)
-        return -dxi, -dyi, trs_times0, trs_times1
+        dxi, dyi, trs_times0, trs_times1, trj_break = forward_time(xi, yi)
+        return -dxi, -dyi, trs_times0, trs_times1, trj_break
 
     def integrate(x0, y0):
         """Return x, y grid-coordinates of trajectory based on starting point.
@@ -1232,15 +1253,15 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         or when it crosses into an already occupied cell in the StreamMask.
         """
         if integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
-            ui = interpgrid(u, x0, y0, axes_scale=axes_scale)
-            vi = interpgrid(v, x0, y0, axes_scale=axes_scale)
+            ui, _ = interpgrid(u, x0, y0, axes_scale=axes_scale)
+            vi, _ = interpgrid(v, x0, y0, axes_scale=axes_scale)
             trs_times_0 = transform_times(x0, y0)
             trs_times_speed = transform_times(None, y0)
         else:
             ui, vi = None, None
 
         def forward_time_stick(xi, yi, ui=ui, vi=vi):
-            ds_dt = interpgrid(speed, xi, yi, axes_scale=axes_scale)
+            ds_dt, trj_break = interpgrid(speed, xi, yi, axes_scale=axes_scale)
             if ds_dt == 0:
                 raise TerminateTrajectory()
             dt_ds = 1. / ds_dt
@@ -1257,11 +1278,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
                     raise TerminateTrajectory()
                 du, dv = trs_times_0[0]*du + trs_times_0[1]*dv, trs_times_0[2]*du + trs_times_0[3]*dv
                 du, dv = np.linalg.solve(J, np.array([du, dv], dtype=float))
-            return du, dv, trs_times_speed[0], trs_times_speed[1]
+            return du, dv, trs_times_speed[0], trs_times_speed[1], trj_break
 
         def backward_time_stick(xi, yi):
-            dxi, dyi, trs_times0, trs_times1 = forward_time_stick(xi, yi)
-            return -dxi, -dyi, trs_times0, trs_times1
+            dxi, dyi, trs_times0, trs_times1, trj_break = forward_time_stick(xi, yi)
+            return -dxi, -dyi, trs_times0, trs_times1, trj_break
 
 
         stotal, D, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., 0., [], [], [], [False, False], [False, False]
@@ -1364,7 +1385,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
     yi = y0
     xf_traj = []
     yf_traj = []
-    m_total = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
+    m_total, _ = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
     hit_edge = False
     hit_boundary = False
 
@@ -1373,16 +1394,17 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
     while dmap.grid.within_grid(xi, yi):
         xf_traj.append(xi)
         yf_traj.append(yi)
-        try:
-            interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
-        except TerminateTrajectory:
-            hit_edge = True
-            break
+
+        _, hit_edge = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
+        if hit_edge: break
 
         try:
-            k1x, k1y, trs_x, trs_y = f(xi, yi)
-            k2x, k2y, trs_x, trs_y = f(xi + ds * k1x,
-                                       yi + ds * k1y)
+            k1x, k1y, trs_x, trs_y, trj_break = f(xi, yi)
+            k2x, k2y, trs_x, trs_y, trj_break = f(xi + ds * k1x,
+                                                yi + ds * k1y)
+            if trj_break:
+                hit_edge = True
+                break
         except IndexError:
             # Out of the domain on one of the intermediate integration steps.
             # Take an Euler step to the boundary to improve neatness.
@@ -1445,7 +1467,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     ny, nx = dmap.grid.shape
     xi = xf_traj[-1]
     yi = yf_traj[-1]
-    cx, cy, trs_x, trs_y = f(xi, yi)
+    cx, cy, trs_x, trs_y, trj_break = f(xi, yi)
     if cx == 0:
         dsx = np.inf
     elif cx < 0:
@@ -1475,12 +1497,10 @@ def interpgrid(a, xi, yi, axes_scale=[False, False]):
         mask = np.zeros_like(data, dtype=np.bool_)
 
     val, mflag = _bilinear_with_mask(data, mask, float(xi), float(yi), axes_scale[0], axes_scale[1])
-    if mflag & (not isinstance(xi, np.ndarray)):
-        raise TerminateTrajectory
-    return float(val)
+    return float(val), mflag
 
 
-@njit("Tuple((f8, b1))(f8[:,::1], b1[:,::1], f8, f8, b1, b1)", fastmath=True, cache=True)
+@njit("Tuple((float64, b1))(float64[:,::1], b1[:,::1], float64, float64, b1, b1)", fastmath=True, cache=True)
 def _bilinear_with_mask(a, m, xi, yi, xlog, ylog):
     Ny, Nx = a.shape
     xf = xi
@@ -1587,9 +1607,11 @@ def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
         ls2 = ls2.simplify(simplify, preserve_topology=True)
     if ls1.is_empty or ls2.is_empty:
         return 0.0, 0.0
+    ls1 = shapely.set_precision(ls1, 10 ** (np.log10(abs(threshold)) - 5))
+    ls2 = shapely.set_precision(ls2, 10 ** (np.log10(abs(threshold)) - 5))
     # Hitbox
-    buf1 = prep(ls1.buffer(threshold, cap_style='round', join_style='round'))
-    buf2 = prep(ls2.buffer(threshold, cap_style='round', join_style='round'))
+    buf1 = prep(ls1.buffer(threshold, cap_style=1, join_style=1))
+    buf2 = prep(ls2.buffer(threshold, cap_style=1, join_style=1))
     # 重叠长度
     inter1_len = ls1.intersection(buf2.context).length
     inter2_len = ls2.intersection(buf1.context).length
@@ -1597,194 +1619,6 @@ def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
     len2 = ls2.length if ls2.length > 0 else 1.0
     return inter1_len / len1, inter2_len / len2
 
-
-def traj_overlap_all(trajs, threshold=0.01, simplify=None, numpy_force=False):
-    """
-    计算一组轨迹两两的重叠长度占比（方向性），一次性返回 N×N 矩阵。
-    P[i, j] = len( LineString(i) ∩ buffer(LineString(j), threshold) ) / len(LineString(i))
-
-    参数
-    ----
-    trajs : list/array
-        轨迹列表，每条可为 (x_seq, y_seq) 或 shape (Mi, 2) 的数组。
-    threshold : float
-        认为“重叠”的距离阈值，用作缓冲区半径。
-    simplify : float or None
-        几何简化，以损失精度为代价，但能显著减少线段数并提速。
-    numpy_force : True or False
-        强制使用纯numpy库进行计算，可避免使用GPU加速带来的报错，但代价是计算速度可能成倍降低。
-    ----
-    P : np.ndarray, shape (N, N), dtype=float
-        方向性占比矩阵。P[i, j] 表示轨迹 i 落在轨迹 j 缓冲区内的长度占比。
-        对角线为 1.0；无候选（bbox 早退过滤）时为 0.0。
-    """
-    # ---------- 工具：统一为 (Ni, 2) 的 float 数组 ----------
-    def to_xy(traj):
-        arr = np.asarray(traj)
-        if arr.ndim == 1:
-            raise ValueError("Each traj must be ((x_seq),(y_seq)) or shape (N,2).")
-        if arr.shape[0] == 2 and arr.shape[1] != 2:
-            arr = np.column_stack(arr)  # (2,N)->(N,2)
-        elif arr.shape[1] != 2:
-            arr = np.column_stack(arr)
-        return np.asarray(arr, dtype=float)
-
-    backend = "numpy"
-    xp = np
-    cupy_available = False
-    torch_available = False
-    # 检查 CuPy (NVIDIA GPU)
-    try:
-        import cupy as cp
-        if cp.cuda.runtime.getDeviceCount() > 0:
-            xp = cp
-            backend = "cupy" if not numpy_force else "numpy"
-            cupy_available = True
-    except Exception:
-        pass
-
-    # 检查 PyTorch (Apple M 或 AMD)
-    if not cupy_available:
-        try:
-            import torch
-            torch_available = True
-            if torch.backends.mps.is_available():  # Apple M 系列
-                backend = "torch" if not numpy_force else "numpy"
-            elif torch.cuda.is_available():  # NVIDIA 或 AMD ROCm
-                backend = "torch" if not numpy_force else "numpy"
-                warnings.warn("检测到支持cuda的GPU, 但CuPy库未安装. ")
-        except Exception:
-            pass
-
-
-    # ---------- 预处理：空/NaN/Inf ----------
-    coords = []
-    for k, tr in enumerate(trajs):
-        c = to_xy(tr)
-        if c.size == 0:
-            coords.append(c)
-            continue
-        if np.isnan(c).any():
-            warnings.warn(f"Trajectory {k} contains NaN; treating as fully overlapping with itself.")
-        if np.isinf(c).any():
-            warnings.warn(f"Trajectory {k} contains Inf; treating as fully overlapping with itself.")
-        coords.append(c)
-
-    N = len(coords)
-    if N == 0:
-        return np.zeros((0, 0), dtype=float)
-
-    # ---------- Shapely 几何体 + 长度 ----------
-    lines = []
-    lengths = np.empty(N, dtype=float)
-    for i, c in enumerate(coords):
-        if c.size == 0:
-            ls = LineString()
-        else:
-            ls = LineString(c)
-            if simplify and simplify > 0:
-                ls = ls.simplify(simplify, preserve_topology=True)
-        lines.append(ls)
-        lengths[i] = ls.length if not ls.is_empty and ls.length > 0 else 1.0  # 防 0
-
-    # ---------- bbox 早退（向量化/可选 GPU） ----------
-    mins = np.array([np.min(c, axis=0) if c.size else np.array([np.inf, np.inf]) for c in coords])
-    maxs = np.array([np.max(c, axis=0) if c.size else np.array([-np.inf, -np.inf]) for c in coords])
-
-    thr2 = float(threshold) * float(threshold)
-
-    def pairwise_bbox_gap2_np(mins, maxs):
-        # gapx_ij = max(0, max(mins[j,0]-maxs[i,0], mins[i,0]-maxs[j,0]))
-        # 通过广播计算 (N,N)
-        minx = mins[:, 0][:, None]
-        maxx = maxs[:, 0][:, None]
-        miny = mins[:, 1][:, None]
-        maxy = maxs[:, 1][:, None]
-
-        gapx = np.maximum(0.0, np.maximum(minx.T - maxx, minx - maxx.T))
-        gapy = np.maximum(0.0, np.maximum(miny.T - maxy, miny - maxy.T))
-        return gapx * gapx + gapy * gapy  # (N,N)
-
-    if backend == "cupy":
-        try:
-            import cupy as cp
-            mins_cu = cp.asarray(mins, dtype=cp.float64)
-            maxs_cu = cp.asarray(maxs, dtype=cp.float64)
-            minx = mins_cu[:, 0][:, None]
-            maxx = maxs_cu[:, 0][:, None]
-            miny = mins_cu[:, 1][:, None]
-            maxy = maxs_cu[:, 1][:, None]
-            gapx = cp.maximum(0.0, cp.maximum(minx.T - maxx, minx - maxx.T))
-            gapy = cp.maximum(0.0, cp.maximum(miny.T - maxy, miny - maxy.T))
-            d2 = (gapx * gapx + gapy * gapy).get()
-        except Exception:
-            warnings.warn("CuPy加速失败，切换为numpy张量加速")
-            d2 = pairwise_bbox_gap2_np(mins, maxs)
-    elif backend == "torch":
-        try:
-            import torch
-            device = torch.device("cuda" if torch.cuda.is_available() else "mps")
-            mins_t = torch.tensor(mins, dtype=torch.float64, device=device)
-            maxs_t = torch.tensor(maxs, dtype=torch.float64, device=device)
-            minx = mins_t[:, 0].unsqueeze(1)
-            maxx = maxs_t[:, 0].unsqueeze(1)
-            miny = mins_t[:, 1].unsqueeze(1)
-            maxy = maxs_t[:, 1].unsqueeze(1)
-            gapx = torch.maximum(torch.zeros(1, device=device, dtype=torch.float64),
-                                 torch.maximum(minx.T - maxx, minx - maxx.T))
-            gapy = torch.maximum(torch.zeros(1, device=device, dtype=torch.float64),
-                                 torch.maximum(miny.T - maxy, miny - maxy.T))
-            d2 = (gapx * gapx + gapy * gapy).cpu().numpy()
-        except Exception:
-            warnings.warn("pytorch加速失败，切换为numpy张量加速")
-            d2 = pairwise_bbox_gap2_np(mins, maxs)
-    else:
-        d2 = pairwise_bbox_gap2_np(mins, maxs)
-
-    candidate = d2 <= thr2  # (N,N)
-    # 若某条为空几何体，则与别人都不可作为候选
-    empty_mask = np.array([ls.is_empty for ls in lines], dtype=bool)
-    candidate[empty_mask, :] = False
-    candidate[:, empty_mask] = False
-
-    # 对角线置 True（自重叠定义为 1.0）
-    np.fill_diagonal(candidate, True)
-
-    # ---------- 预构建缓冲区与 prepared geometry（针对列 j） ----------
-    bufs = [None] * N
-    preps = [None] * N
-    for j, ls in enumerate(lines):
-        if ls.is_empty:
-            bufs[j] = None
-            preps[j] = None
-            continue
-        bufj = ls.buffer(threshold, cap_style='round', join_style='round')
-        bufs[j] = bufj
-        preps[j] = prep(bufj)
-
-    # ---------- 计算定向重叠长度占比 ----------
-    P = np.zeros((N, N), dtype=float)
-    # 自身完全重叠
-    for i in range(N):
-        P[i, i] = 1.0 if not lines[i].is_empty else 0.0
-
-    # 遍历候选对（可以按列或按稀疏索引）
-    idx_i, idx_j = np.where(candidate & (np.eye(N, dtype=bool) == False))
-    # 为了局部性，按 j 分组
-    order = np.argsort(idx_j, kind="mergesort")
-    idx_i = idx_i[order]
-    idx_j = idx_j[order]
-
-    last_j = -1
-    for i, j in zip(idx_i, idx_j):
-        lsi = lines[i]
-        if preps[j] is None:
-            continue
-        # 交集长度：LineString(i) ∩ buffer(LineString(j))
-        inter_len = lsi.intersection(bufs[j]).length
-        P[i, j] = inter_len / lengths[i]
-
-    return P
 
 
 def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='v', linewidth=.5,
@@ -1815,14 +1649,15 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
                     width=f"{shrink*100*width_shrink}%", height=f"{shrink*100*height_shrink}%",
                     loc=loc,
                     bbox_to_anchor=bbox_to_anchor,  # 在主图axes区域内定位
-                    borderpad=0.0)
+                    borderpad=0.0
+                    )
     else:
         axes_sub = inset_axes(
                     axes,
                     width=f"{shrink*100*width_shrink}%", height=f"{shrink*100*height_shrink}%",
                     loc=loc,
-                    borderpad=0.0,
-        )
+                    borderpad=0.0
+                    )
     # 不显示刻度和刻度标签
     axes_sub.set_xticks([])
     axes_sub.set_yticks([])
@@ -1839,12 +1674,13 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
         ax_times = (axes_sub.get_xlim()[1] - axes_sub.get_xlim()[0]) / (axes.get_xlim()[1] - axes.get_xlim()[0])
     axes_scale = data_unit_scale(axes, 1e-3, axes.projection.proj4_params.get("lon_0", None), 0)
     axes_axis_scale = data_unit_scale(axes_sub, 1e-3, 0, 0) * ax_times
-    U_trans = U / ds_dx * (axes_scale / axes_axis_scale) * ax_times / shrink / 2
+    U_times = 1 / ds_dx * (axes_scale / axes_axis_scale) * ax_times / shrink / 2
+    U_trans = U * U_times
     # 绘制图例
     x, y = U_trans * np.cos(angle) / width_shrink, U_trans * np.sin(angle) / height_shrink
     arrow = patches.FancyArrowPatch(
     (x, y), (x+(1e-9)*np.cos(angle), y+(1e-9)*np.sin(angle))
-              , arrowstyle=arrowstyle, mutation_scale=arrowsize, linewidth=linewidth, color=color)
+              , arrowstyle=arrowstyle, mutation_scale=arrowsize * U_times * 15, linewidth=linewidth, color=color)
     axes_sub.add_patch(arrow)
     lines = [[[-x, y], [x, -y]]]
     lc = mcollections.LineCollection(lines, capstyle='round', linewidth=linewidth, color=color)
@@ -1859,24 +1695,23 @@ if __name__ == '__main__':
     y = np.linspace(-90, 90, 180*5)
     Y, X = np.meshgrid(y, x)
 
-    U = np.linspace(1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
-    V = np.linspace(0, 0, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
+    U = np.linspace(-1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
+    V = np.linspace(1, -1, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
     speed = np.where((U**2 + V**2)< 0.2, True, False)
     # 创建掩码UV
     U = np.ma.array(U, mask=speed)
     V = np.ma.array(V, mask=speed)
     #####
     fig = matplotlib.pyplot.figure(figsize=(10, 10))
-    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(100.5))
-    ax1.set_extent([-180, 180, 30, 90], crs=ccrs.PlateCarree())
-
-
-    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=30, color='k', linewidth=0.8, arrowsize=1, center_lon=100.5, MinDistance=[2, 0.2],
-                     arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='stick_both', transform=ccrs.PlateCarree())
-    ax1.contourf(x, y, U, levels=[-1, 0, 1], cmap=plt.cm.PuOr_r, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
-    ax1.contourf(x, y, V, levels=[-1, 0, 1], cmap=plt.cm.RdBu, transform=ccrs.PlateCarree(), extend='both',alpha=0.5, zorder=10)
-    # ax1.quiver(x, y, U, V, transform=ccrs.PlateCarree(0), regrid_shape=20, scale=25)
-    a1.key(shrink=0.25)
+    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(central_longitude=115))
+    ax1.set_global()
+    # 海洋填色为蓝色
+    ax1.add_feature(cfeature.OCEAN.with_scale('110m'), facecolor='lightblue')
+    ax1.add_feature(cfeature.LAND.with_scale('110m'), facecolor='lightgreen')
+    ax1.add_feature(cfeature.LAKES.with_scale('110m'), facecolor='lightblue')
+    ax1.add_feature(cfeature.RIVERS.with_scale('110m'), edgecolor='lightblue')
+    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=80, color='k', linewidth=0.8, arrowsize=1, center_lon=115, MinDistance=[0.2, 0.5],
+                     arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='both', transform=ccrs.PlateCarree())
+    a1.key(shrink=0.1)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
-
     plt.show()
