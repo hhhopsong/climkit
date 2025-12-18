@@ -23,3 +23,4 @@ pymannkendall>=1.0
 statsmodels>=0.9
 pycwt
 alive_progress
+pyproj>=3.6.1

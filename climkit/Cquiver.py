@@ -18,7 +18,6 @@ import pyproj
 import matplotlib
 import matplotlib.colors as mcolors
 import matplotlib.collections as mcollections
-import matplotlib.transforms as mtransforms
 import matplotlib.lines as mlines
 import matplotlib.pyplot as plt
 from matplotlib import _api, cm, patches
@@ -27,8 +26,8 @@ from matplotlib.patches import PathPatch, ArrowStyle
 from matplotlib.path import Path
 from mpl_toolkits.axes_grid1.inset_locator import inset_axes
 import shapely
-from shapely.geometry import LineString
 from shapely.prepared import prep
+from shapely.geometry import LineString
 from operator import itemgetter
 # 辅助三方库
 from alive_progress import alive_bar
@@ -185,6 +184,18 @@ class TriHead(patches.ArrowStyle._Base):
 ArrowStyle._style_list["v"] = VHead
 ArrowStyle._style_list["tri"] = TriHead
 
+def _curlyquiver_method(self, x, y, U, V, **kwargs):
+    """让 ax.Curlyquiver(x,y,U,V,...) 返回 Curlyquiver 对象"""
+    return Curlyquiver(self, x, y, U, V, **kwargs)
+
+matplotlib.axes.Axes.Curlyquiver = _curlyquiver_method
+
+try:
+    from cartopy.mpl.geoaxes import GeoAxes
+    GeoAxes.Curlyquiver = _curlyquiver_method
+except Exception:
+    pass
+
 
 def lontransform(data, lon_name='lon', type='180->360'):
     """
@@ -251,7 +262,7 @@ def data_unit_scale(ax, dx=1.0, x0=None, y0=None):
 class Curlyquiver:
     def __init__(self, ax, x, y, U, V, lon_trunc=None, linewidth=.5, color='black', cmap=None, norm=None, arrowsize=.5,
                  arrowstyle='v', transform=None, zorder=None, start_points='interleaved', scale=1., regrid=30,
-                 regrid_reso=2.5, integration_direction='both', nanmax=None, center_lon=180., alpha=1.,
+                 regrid_reso=2.5, integration_direction='both', nanmax=None, center_lon=0., alpha=1.,
                  thinning=['0%', 'min'], MinDistance=[0., 1.]):
         """绘制矢量曲线.
 
@@ -292,7 +303,7 @@ class Curlyquiver:
                 风速单位一
             *center_lon* : float
                 中心经度
-                中心经度，默认180.
+                中心经度，默认0.
             *alpha* : float(0-1)
                 矢量透明度，默认1.
             *thinning* : [float , str]
@@ -386,7 +397,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                cmap=None,      norm=None,    arrowsize=.5,    arrowstyle='v',
                transform=None, zorder=None,  start_points= 'interleaved',
                scale=100.,     regrid=30,    regrid_reso=2.5, integration_direction='both',
-               nanmax=None,    center_lon=180.,               thinning=[1, 'random'],   MinDistance=[0.1, 0.5],
+               nanmax=None,    center_lon=0,               thinning=[1, 'random'],   MinDistance=[0.1, 0.5],
                alpha=1.,       latlon_zoom='True'):
     """绘制矢量曲线"""
 
@@ -813,67 +824,44 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
     if MinDistance[0] > 0 and MinDistance[1] < 1:
         _trajectories = trajectories.copy()
+        TRS_lonlat2proj = pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True)
         for i in range(len(trajectories)):
-            _t_ = dmap.grid2data(*np.array(_trajectories[i]))
-            _trajectories[i] = pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True).transform(_t_[0], _t_[1])
+            _tx_, _ty_ = dmap.grid2data(*np.array(_trajectories[i]))
+            _tx_ += grid.x_origin
+            _ty_ += grid.y_origin
+            _trajectories[i] = TRS_lonlat2proj.transform(_tx_, _ty_)
+            # Debug 越边界判定范围异常问题
+            _trajectories[i] = np.array([_unwrap_if_jump(_trajectories[i][0]), np.asarray(_trajectories[i][1], np.float64)])
+            _trajectories[i] = _trajectories[i][:, np.all(np.isfinite(_trajectories[i]), axis=0)]
         distance_limit_tlen = []
         distance_limit_traj = []
         distance_limit_edges = []
         distance_limit_boundarys = []
-        try:
-            dictance_matrix = traj_overlap_all(_trajectories, MinDistance[0])
-            distance_limit_index = []
-            with alive_bar(len(trajectories), title='疏离化', bar='smooth', spinner='triangles', force_tty=True) as bar:
-                for i in range(len(trajectories)):
-                    if np.isnan(traj_length[i]) or np.isinf(traj_length[i]):
-                        continue
-                    if i == 0:
-                        distance_limit_tlen.append(traj_length[i])
-                        distance_limit_traj.append(trajectories[i])
-                        distance_limit_edges.append(edges[i])
-                        distance_limit_boundarys.append(boundarys[i])
-                        distance_limit_index.append(i)
-                    else:
-                        add_signl = True
-                        for i_in in distance_limit_index:
-                            too_close_percent = dictance_matrix[i, i_in]
-                            if too_close_percent >= MinDistance[1]:
-                                add_signl = False
-                                break
-                        if add_signl:
-                            distance_limit_tlen.append(traj_length[i])
-                            distance_limit_traj.append(trajectories[i])
-                            distance_limit_edges.append(edges[i])
-                            distance_limit_boundarys.append(boundarys[i])
-                            distance_limit_index.append(i)
-                    bar()
-        except:
-            distance_limit_traj_trs = []
-            warnings.warn("加速计算失败,请耐心等候...")
-            with alive_bar(len(trajectories), title='疏离化', bar='smooth', spinner='dots', force_tty=True) as bar:
-                for i in range(len(trajectories)):
-                    if np.isnan(traj_length[i]) or np.isinf(traj_length[i]):
-                        continue
-                    if i == 0:
+        distance_limit_traj_trs = []
+        with alive_bar(len(trajectories), title='疏离化', bar='smooth', spinner='dots', force_tty=True) as bar:
+            for i in range(len(_trajectories)):
+                if np.isnan(traj_length[i]) or np.isinf(traj_length[i]):
+                    continue
+                if i == 0:
+                    distance_limit_tlen.append(traj_length[i])
+                    distance_limit_traj.append(trajectories[i])
+                    distance_limit_edges.append(edges[i])
+                    distance_limit_boundarys.append(boundarys[i])
+                    distance_limit_traj_trs.append(_trajectories[i])
+                else:
+                    add_signl = True
+                    for i_in in range(len(distance_limit_traj_trs)):
+                        too_close_percent = traj_overlap(_trajectories[i], distance_limit_traj_trs[i_in], MinDistance[0])
+                        if too_close_percent >= MinDistance[1]:
+                            add_signl = False
+                            break
+                    if add_signl:
                         distance_limit_tlen.append(traj_length[i])
                         distance_limit_traj.append(trajectories[i])
                         distance_limit_edges.append(edges[i])
                         distance_limit_boundarys.append(boundarys[i])
                         distance_limit_traj_trs.append(_trajectories[i])
-                    else:
-                        add_signl = True
-                        for i_in in range(len(distance_limit_traj_trs)):
-                            too_close_percent = traj_overlap(_trajectories[i], distance_limit_traj_trs[i_in], MinDistance[0])[0]
-                            if too_close_percent >= MinDistance[1]:
-                                add_signl = False
-                                break
-                        if add_signl:
-                            distance_limit_tlen.append(traj_length[i])
-                            distance_limit_traj.append(trajectories[i])
-                            distance_limit_edges.append(edges[i])
-                            distance_limit_boundarys.append(boundarys[i])
-                            distance_limit_traj_trs.append(_trajectories[i])
-                    bar()
+                bar()
         traj_length, trajectories, edges, boundarys = distance_limit_tlen, distance_limit_traj, distance_limit_edges, distance_limit_boundarys
 
 
@@ -940,7 +928,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
             line_colors.append(color_values)
             arrow_kw['color'] = cmap(norm(color_values[n]))
         
-        if (not edge) and (not boundary):
+        if (not edge):
             if MAP:
                 p = patches.FancyArrowPatch(
                     arrow_head, arrow_tail, transform=transform, **arrow_kw)
@@ -975,7 +963,11 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                     arrow_head_visual, arrow_tail_visual, transform=transform, **arrow_kw)
         # 在非碰壁情况下绘制箭头
             p.set_alpha(alpha)
-            axes.add_patch(p)
+            try:
+                axes.add_patch(p)
+            except StopIteration:
+                warnings.warn('某些箭头超出绘图边界, 将不予绘制异常箭头')
+                continue
             arrows.append(p)
         else:
             continue
@@ -1189,10 +1181,11 @@ class StreamMask(object):
 #========================
 def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', axes_scale=[False, False], transform=None):
     axes_scale = axes_scale
+    MAP = isinstance(transform, ccrs.Projection)
 
     # rescale velocity onto grid-coordinates for integrations.
     u, v = dmap.data2grid(u, v)
-
+    nx, ny = dmap.grid.shape
     # speed (path length) will be in axes-coordinates
     u_ax = u / dmap.grid.nx
     v_ax = v / dmap.grid.ny
@@ -1253,15 +1246,15 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         or when it crosses into an already occupied cell in the StreamMask.
         """
         if integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
-            ui, _ = interpgrid(u, x0, y0, axes_scale=axes_scale)
-            vi, _ = interpgrid(v, x0, y0, axes_scale=axes_scale)
+            ui, _ = interpgrid(u, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
+            vi, _ = interpgrid(v, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
             trs_times_0 = transform_times(x0, y0)
             trs_times_speed = transform_times(None, y0)
         else:
             ui, vi = None, None
 
         def forward_time_stick(xi, yi, ui=ui, vi=vi):
-            ds_dt, trj_break = interpgrid(speed, xi, yi, axes_scale=axes_scale)
+            ds_dt, trj_break = interpgrid(speed, xi, yi, axes_scale=axes_scale, wrap_x=MAP)
             if ds_dt == 0:
                 raise TerminateTrajectory()
             dt_ds = 1. / ds_dt
@@ -1288,10 +1281,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         stotal, D, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., 0., [], [], [], [False, False], [False, False]
 
         if integration_direction in ['both', 'backward', 'forward']:
-            dmap.start_trajectory(x0, y0)
+            if MAP: dmap.start_trajectory(x0 % nx, y0)
+            else: dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['both', 'backward']:
-                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 D += D_
                 x_traj += x_traj_[::-1]
@@ -1301,7 +1295,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
             if integration_direction in ['both', 'forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 D += D_
                 x_traj += x_traj_[1:]
@@ -1310,10 +1304,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
                 hit_boundary[1] = hit_boundary_
 
         elif integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
-            dmap.start_trajectory(x0, y0)
+            if MAP: dmap.start_trajectory(x0 % nx, y0)
+            else: dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['stick_both', 'stick_backward']:
-                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 D += D_
                 x_traj += x_traj_[::-1]
@@ -1323,7 +1318,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
             if integration_direction in ['stick_both', 'stick_forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False])
+                stotal_, D_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 D += D_
                 x_traj += x_traj_[1:]
@@ -1342,7 +1337,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
     return integrate
 
-def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
+def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_x=True):
     """2nd-order Runge-Kutta algorithm with adaptive step size.
 
     This method is also referred to as the improved Euler's method, or Heun's
@@ -1385,25 +1380,25 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
     yi = y0
     xf_traj = []
     yf_traj = []
-    m_total, _ = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
+    m_total, _ = interpgrid(magnitude, xi, yi, axes_scale=axes_scale, wrap_x=wrap_x)
     hit_edge = False
     hit_boundary = False
-
+    nx, ny = dmap.grid.shape
     axes_scale = axes_scale
     
-    while dmap.grid.within_grid(xi, yi):
+    while dmap.grid.within_grid(xi, yi) or wrap_x:
         xf_traj.append(xi)
         yf_traj.append(yi)
 
-        _, hit_edge = interpgrid(magnitude, xi, yi, axes_scale=axes_scale)
-        if hit_edge: break
+        _, hit_boundary = interpgrid(magnitude, xi, yi, axes_scale=axes_scale, wrap_x=wrap_x)
+        if hit_boundary: break
+        if not dmap.grid.within_grid(nx, yi): break
 
         try:
             k1x, k1y, trs_x, trs_y, trj_break = f(xi, yi)
             k2x, k2y, trs_x, trs_y, trj_break = f(xi + ds * k1x,
                                                 yi + ds * k1y)
             if trj_break:
-                hit_edge = True
                 break
         except IndexError:
             # Out of the domain on one of the intermediate integration steps.
@@ -1423,7 +1418,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
         dx2 = ds * 0.5 * (k1x + k2x)
         dy2 = ds * 0.5 * (k1y + k2y)
 
-        nx, ny = dmap.grid.shape
+
         # Error is normalized to the axes coordinates
         error = np.sqrt(((dx2 - dx1) / nx) ** 2 + ((dy2 - dy1) / ny) ** 2)
 
@@ -1439,14 +1434,16 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
                 # 按比例缩放最后一步的位移
                 xi += dx2 * (fraction-1)
                 yi += dy2 * (fraction-1)
-                dmap.update_trajectory(xi, yi)
+                if wrap_x: dmap.update_trajectory(xi % nx, yi)
+                else: dmap.update_trajectory(xi, yi)
                 stotal += s_remaining
                 D += np.sqrt((np.array(dmap.grid2data((dx2 * trs_x) * (fraction - 1), (dy2 * trs_y) * (fraction - 1))) ** 2).sum())
                 xf_traj.append(xi)
                 yf_traj.append(yi)
                 break
 
-            dmap.update_trajectory(xi, yi)
+            if wrap_x: dmap.update_trajectory(xi % nx, yi)
+            else: dmap.update_trajectory(xi, yi)
             stotal += ds
             D += np.sqrt((np.array(dmap.grid2data(dx2 * trs_x, dy2 * trs_y)) ** 2).sum())
 
@@ -1456,8 +1453,8 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False]):
         else:
             ds = min(maxds, 0.85 * ds * (maxerror / error) ** 0.5)
 
-    if not dmap.grid.within_grid(xi, yi):
-        hit_boundary = True  # 碰到数据边界
+    if hit_boundary or not dmap.grid.within_grid(xi, yi):
+        hit_boundary = True  # 碰到有效数据边界
 
     return stotal, D, xf_traj, yf_traj, hit_edge, hit_boundary
 
@@ -1486,7 +1483,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     return ds, xf_traj, yf_traj, cx * ds * trs_x, cy * ds * trs_y
 
 
-def interpgrid(a, xi, yi, axes_scale=[False, False]):
+def interpgrid(a, xi, yi, axes_scale=[False, False], wrap_x=True):
     """Fast 2D, linear interpolation on an integer grid/整数网格上的快速二维线性插值"""
     # 拆成数据和布尔掩膜
     if np.ma.isMaskedArray(a):
@@ -1496,25 +1493,45 @@ def interpgrid(a, xi, yi, axes_scale=[False, False]):
         data = np.asarray(a, dtype=np.float64)
         mask = np.zeros_like(data, dtype=np.bool_)
 
-    val, mflag = _bilinear_with_mask(data, mask, float(xi), float(yi), axes_scale[0], axes_scale[1])
+    val, mflag = _bilinear_with_mask(data, mask, float(xi), float(yi), axes_scale[0], axes_scale[1], wrap_x)
     return float(val), mflag
 
 
-@njit("Tuple((float64, b1))(float64[:,::1], b1[:,::1], float64, float64, b1, b1)", fastmath=True, cache=True)
-def _bilinear_with_mask(a, m, xi, yi, xlog, ylog):
+@njit("Tuple((float64, b1))(float64[:,::1], b1[:,::1], float64, float64, b1, b1, b1)", fastmath=True, cache=True)
+def _bilinear_with_mask(a, m, xi, yi, xlog, ylog, wrap_x):
     Ny, Nx = a.shape
     xf = xi
     yf = yi
 
-    x = int(np.floor(xf))
-    y = int(np.floor(yf))
-    if x < 0: x = 0
-    if y < 0: y = 0
-    if x > Nx - 1: x = Nx - 1
-    if y > Ny - 1: y = Ny - 1
+    if wrap_x:
+        x = int(np.floor(xf))
+        y = int(np.floor(yf))
+        if y < 0: y = 0
+        if y > Ny - 1: y = Ny - 1
 
-    xn = x if x == (Nx - 1) else x + 1
-    yn = y if y == (Ny - 1) else y + 1
+        xn = x + 1
+        yn = y if y == (Ny - 1) else y + 1
+        if x > 0:
+            xt = xf - x
+            x = x % Nx
+        else:
+            xt = xf - x
+            x = Nx - abs(x)
+
+        if xn > 0:
+            xn = xn % Nx
+        else:
+            xn = Nx - abs(xn)
+    else:
+        x = int(np.floor(xf))
+        y = int(np.floor(yf))
+        if x < 0: x = 0
+        if y < 0: y = 0
+        if x > Nx - 1: x = Nx - 1
+        if y > Ny - 1: y = Ny - 1
+
+        xn = x if x == (Nx - 1) else x + 1
+        yn = y if y == (Ny - 1) else y + 1
 
     masked_corner = (m[y, x] or m[y, xn] or m[yn, x] or m[yn, xn])
 
@@ -1522,7 +1539,7 @@ def _bilinear_with_mask(a, m, xi, yi, xlog, ylog):
         denomx = (10.0 ** xn - 10.0 ** x)
         xt = (10.0 ** xf - 10.0 ** x) / (denomx if denomx != 0.0 else 1e-20)
     else:
-        xt = xf - x
+        xt = xf - x if not wrap_x else xt
     if ylog:
         denomy = (10.0 ** yn - 10.0 ** y)
         yt = (10.0 ** yf - 10.0 ** y) / (denomy if denomy != 0.0 else 1e-20)
@@ -1554,7 +1571,28 @@ def _gen_starting_points(x,y,grains):
     
     return seed_points.T
 
-def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
+
+def _unwrap_if_jump(lon, k=8.0):
+    """
+    lon_deg: 经度（度）
+    k: 越大越不敏感（更少触发）
+    min_jump_deg: 阈值下限，避免正常航迹拐弯也触发
+    """
+    lon = np.asarray(lon, dtype=np.float64)
+    if lon.size < 3:
+        return lon
+
+    d = np.abs(np.diff(lon))
+    med = np.median(d)
+    mad = np.median(np.abs(d - med)) + 1e-12  # 防止 0
+    thr = med + k * mad
+
+    # 只有出现“异常跳变”才 unwrap
+    if np.any(d > thr):
+        lon = np.unwrap(np.deg2rad(lon))
+    return lon
+
+def traj_overlap(traj1, traj2, threshold):
     """
     检查两条轨迹是否重叠
     :param traj1: 第一条轨迹，格式为 (x, y)
@@ -1563,62 +1601,61 @@ def traj_overlap(traj1, traj2, threshold=0.01, simplify=None):
     :return:  返回两条轨迹重叠部分占两条轨迹长度的各自百分比，如 (p1, p2)
     """
 
-    points1 = np.column_stack(traj1)
-    points2 = np.column_stack(traj2)
+    points1 = np.column_stack([*traj1])
+    points2 = np.column_stack([*traj2])
 
     if points1.size == 0 or points2.size == 0:
-        return 0.0, 0.0
+        return 0.0
     if np.isnan(points1).any() or np.isnan(points2).any():
         warnings.warn("Trajectory contains NaN values.")
-        return 1.0, 1.0
+        return 1.0
     elif np.isinf(points1).any() or np.isinf(points2).any():
         warnings.warn("Trajectory contains Inf values.")
-        return 1.0, 1.0
+        return 1.0
 
-    # power by GPT5 (shapely speed up)
-    # 用折线-缓冲区法计算两条轨迹的重叠比例（长度占比），返回 (p1, p2)。
-    # 依赖 shapely>=2.0（内置 PyGEOS，速度快）
-    def to_xy(traj):
-        arr = np.asarray(traj)
-        if arr.ndim == 1:
-            raise ValueError("traj must be ((x_seq),(y_seq)) or shape (N,2).")
-        if arr.shape[0] == 2 and arr.shape[1] != 2:
-            arr = np.column_stack(arr)  # (2,N)->(N,2)
-        elif arr.shape[1] != 2:
-            arr = np.column_stack(arr)
-        return np.asarray(arr, dtype=float)
+    if _box_out_(points1, points2, threshold):
+        return 0.0
 
+    return _line_out_(points1, points2, threshold)
+
+def _box_out_(p1, p2, threshold):
+    """
+    判断两个点是否在边界外超过阈值距离
+    :param p1: 点1，格式为 (x, y)
+    :param p2: 点2，格式为 (x, y)
+    :param threshold: 距离阈值
+    :return:  如果两个点在边界外超过阈值距离，返回 True；否则返回 False
+    """
     # ---------- bbox 下界距离早退 ----------
-    min1 = points1.min(axis=0); max1 = points1.max(axis=0)  # [x_min, y_min], [x_max, y_max]
-    min2 = points2.min(axis=0); max2 = points2.max(axis=0)
+    min1 = p1.min(axis=0); max1 = p1.max(axis=0)
+    min2 = p2.min(axis=0); max2 = p2.max(axis=0)
     # 对每个轴：若两个区间相离，取正间隙；若重叠，取 0
     gapx = max(0.0, max(min2[0] - max1[0], min1[0] - max2[0]))
     gapy = max(0.0, max(min2[1] - max1[1], min1[1] - max2[1]))
     # bbox 间最小欧氏距离的平方
     if (gapx * gapx + gapy * gapy) > (threshold * threshold):
-        return 0.0, 0.0
+        return True
+    else:
+        return False
 
-    # 构造折线
-    ls1 = LineString(points1)
-    ls2 = LineString(points2)
-    # 可选：先做几何简化（不改变拓扑），能显著减少段数
-    if simplify and simplify > 0:
-        ls1 = ls1.simplify(simplify, preserve_topology=True)
-        ls2 = ls2.simplify(simplify, preserve_topology=True)
+def _line_out_(p1, p2, threshold):
+    """
+    判断两线段缓冲区重合长度
+    """
+    ls1 = LineString(p1)
+    ls2 = LineString(p2)
+
     if ls1.is_empty or ls2.is_empty:
-        return 0.0, 0.0
+        return 0.0
+
     ls1 = shapely.set_precision(ls1, 10 ** (np.log10(abs(threshold)) - 5))
     ls2 = shapely.set_precision(ls2, 10 ** (np.log10(abs(threshold)) - 5))
-    # Hitbox
-    buf1 = prep(ls1.buffer(threshold, cap_style=1, join_style=1))
-    buf2 = prep(ls2.buffer(threshold, cap_style=1, join_style=1))
+    buf2 = prep(ls2.buffer(threshold, cap_style='round', join_style='round'))
+
     # 重叠长度
     inter1_len = ls1.intersection(buf2.context).length
-    inter2_len = ls2.intersection(buf1.context).length
     len1 = ls1.length if ls1.length > 0 else 1.0
-    len2 = ls2.length if ls2.length > 0 else 1.0
-    return inter1_len / len1, inter2_len / len2
-
+    return inter1_len / len1
 
 
 def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='v', linewidth=.5,
@@ -1703,14 +1740,14 @@ if __name__ == '__main__':
     V = np.ma.array(V, mask=speed)
     #####
     fig = matplotlib.pyplot.figure(figsize=(10, 10))
-    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(central_longitude=115))
+    ax1 = fig.add_subplot(121, projection=ccrs.Orthographic(central_longitude=115))
     ax1.set_global()
     # 海洋填色为蓝色
     ax1.add_feature(cfeature.OCEAN.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.LAND.with_scale('110m'), facecolor='lightgreen')
     ax1.add_feature(cfeature.LAKES.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.RIVERS.with_scale('110m'), edgecolor='lightblue')
-    a1 = Curlyquiver(ax1, x, y, U, V, regrid=20, scale=80, color='k', linewidth=0.8, arrowsize=1, center_lon=115, MinDistance=[0.2, 0.5],
+    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=70, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.1, 0.2],
                      arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='both', transform=ccrs.PlateCarree())
     a1.key(shrink=0.1)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
