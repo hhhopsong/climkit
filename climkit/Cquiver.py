@@ -1213,27 +1213,23 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
     if integration_direction in ['both', 'stick_both']:
         speed = speed / 2.
 
-    def transform_times(x_=None, y_=0):
-        _c_lon = transform.proj4_params.get("lon_0", None)
+    def transform_times(x_, y_):
         delta_y = y_ - int(y_)
         try:
             Y = y[int(y_)]*(1-delta_y) + y[int(y_)+1]*delta_y
         except IndexError:
             Y = y[int(y_)]
-        if x_ is None:
-            transform_dxdy = pyproj.Proj(transform).get_factors(_c_lon, Y)
-            return transform_dxdy[8], transform_dxdy[11]
-        else:
-            delta_x = x_ - int(x_)
+        delta_x = x_ - int(x_)
+        try:
+            X = x[int(x_)] * (1 - delta_x) + x[int(x_) + 1] * delta_x
+        except IndexError:
             try:
-                X = x[int(x_)] * (1 - delta_x) + x[int(x_) + 1] * delta_x
+                X = x[int(x_)] * (1 - delta_x) + (x[0] + 360) * delta_x
             except IndexError:
-                try:
-                    X = x[int(x_)] * (1 - delta_x) + (x[0] + 360) * delta_x
-                except IndexError:
-                    X = (x[0] + 360) * (1 - delta_x) + (x[1] + 360) * delta_x
-            transform_dxdy = pyproj.Proj(transform).get_factors(X, Y)
-            return transform_dxdy[8], transform_dxdy[9], transform_dxdy[10], transform_dxdy[11], X, Y, transform
+                X = (x[0] + 360) * (1 - delta_x) + (x[1] + 360) * delta_x
+        transform_dxdy = pyproj.Proj(transform).get_factors(X, Y)
+        scale = [transform_dxdy[1], transform_dxdy[0]]
+        return transform_dxdy[8], transform_dxdy[9], transform_dxdy[10], transform_dxdy[11], scale
 
 
     def forward_time(xi, yi):
@@ -1247,11 +1243,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         dv = vi * dt_ds
         if not isinstance(transform, ccrs.PlateCarree):
             trs_times = transform_times(xi, yi)
-            du /= (trs_times[0]**2 + trs_times[2]**2)**0.5
-            dv /= (trs_times[1]**2 + trs_times[3]**2)**0.5
+            du /= trs_times[4][0]
+            dv /= trs_times[4][1]
         else:
             trs_times = [1, 1]
-        return du, dv, (trs_times[0]**2 + trs_times[2]**2)**0.5, (trs_times[1]**2 + trs_times[3]**2)**0.5, _1|_2|_3
+        return du, dv, trs_times[4], trs_times[4], _1|_2|_3
 
     def backward_time(xi, yi):
         dxi, dyi, trs_times0, trs_times1, trj_break = forward_time(xi, yi)
@@ -1270,7 +1266,6 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             ui, _ = interpgrid(u, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
             vi, _ = interpgrid(v, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
             trs_times_0 = transform_times(x0, y0)
-            trs_times_speed = transform_times(None, y0)
         else:
             ui, vi = None, None
 
@@ -1281,8 +1276,8 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             dt_ds = 1. / ds_dt
             du = ui * dt_ds
             dv = vi * dt_ds
-            du /= (trs_times_0[0]**2 + trs_times_0[2]**2)**0.5
-            dv /= (trs_times_0[1]**2 + trs_times_0[3]**2)**0.5
+            du /= trs_times_0[4][0]
+            dv /= trs_times_0[4][1]
             if not isinstance(transform, ccrs.PlateCarree):
                 trs_times = transform_times(xi, yi)
                 J = np.array([[trs_times[0], trs_times[1]],
@@ -1748,7 +1743,7 @@ if __name__ == '__main__':
     V = np.ma.array(V, mask=speed)
     #####
     fig = matplotlib.pyplot.figure()
-    ax1 = fig.add_subplot(121, projection=ccrs.PlateCarree(central_longitude=115))
+    ax1 = fig.add_subplot(121, projection=ccrs.Orthographic(central_longitude=115))
     ax1.set_global()
     # 海洋填色为蓝色
     ax1.add_feature(cfeature.OCEAN.with_scale('110m'), facecolor='lightblue')
