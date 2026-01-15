@@ -292,8 +292,8 @@ class Curlyquiver:
                 当 ``start_points`` 为 'interleaved' 时，会根据 ``x`` 和 ``y`` 数组自动生成蜂窝状起绘点。
             *zorder* : int
                 ``zorder`` 属性决定了绘图元素的绘制顺序,数值较大的元素会被绘制在数值较小的元素之上。
-            *scale* : float(0-100)
-                矢量的最大长度。
+            *scale* : float
+                矢量的长度。
             *regrid* : int(>=2)
                 是否重新插值网格
             *regrid_reso* : float
@@ -571,19 +571,17 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
             X, Y = np.meshgrid(x, y)
             u = U((Y, X))
             v = V((Y, X))
-            if MAP: zone_scale = np.abs(extent[0] - extent[1]) / np.abs(x[0] - x[-1]) # 区域裁剪对风矢的缩放比例
         else:
             X, Y = np.meshgrid(x, y)
             u = U((Y, X))
             v = V((Y, X))
-            if MAP: zone_scale = np.abs(extent[2] - extent[3]) / np.abs(y[0] - y[-1]) # 区域裁剪对风矢的缩放比例
     else:
         raise ValueError('regrid 必须为非零整数')
 
     # 风速归一化
     wind = np.ma.sqrt(u ** 2 + v ** 2)     # scale缩放
     nanmax = np.nanmax(wind) if nanmax == None else nanmax
-    wind_shrink = 1 / nanmax / scale
+    wind_shrink = 1 / nanmax * scale
     u = u * wind_shrink
     v = v * wind_shrink
 
@@ -766,30 +764,9 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
             bar()
 
     # 稀疏化
-    @njit(fastmath=True, cache=True)
-    def _distance(x, y):
-        length = 0.
-        for i in range(1, len(x)):
-            length += ((x[i] - x[i - 1]) ** 2 + (y[i] - y[i - 1]) ** 2)**0.5
-        return length
-
-    D = [pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True).transform(
-            dmap.grid2data(*np.array(trajectories[i]))[0]+grid.x_origin, dmap.grid2data(*np.array(trajectories[i]))[1]+grid.y_origin)
-        for i in range(len(trajectories))]
-    D = [axes.transData.transform(np.column_stack([D[i][0], D[i][1]])) for i in range(len(D))]
-    D = np.ma.masked_array([_distance(D[i][:, 0], D[i][:, 1]) for i in range(len(D))], mask=boundarys)
-    dsdx = traj_length / D / wind_shrink
-    if np.nanmax(dsdx) - np.nanmin(dsdx) < 1e-5:
-        dsdx = np.nanmedian(dsdx)
-    else:
-        warnings.warn('请注意：矢量单位长度测算可能有误', UserWarning)
-        dsdx = np.asanyarray(dsdx)
-        if np.ma.isMaskedArray(dsdx):
-            dsdx = dsdx.compressed()  # 去掉 masked
-        dsdx = dsdx[np.isfinite(dsdx)]  # 去掉 NaN/Inf
-        vals, counts = np.unique(np.round(dsdx, 5), return_counts=True)
-        mode = vals[np.argmax(counts)]
-        dsdx = mode
+    dsdx = dmap.grid.dx * wind_shrink
+    if (dmap.grid.dx-dmap.grid.dy)>0.1:
+        warnings.warn('数据网格dx和dy差异过大，可能导致单位矢量长度错误(PEP528-579)', UserWarning)
     combined = list(zip(traj_length, trajectories, edges, boundarys))
     combined.sort(key=itemgetter(0), reverse=True)  # 按第 0 个元素（traj_length）降序
     traj_length, trajectories, edges, boundarys = map(list, zip(*combined))
@@ -880,13 +857,6 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
         traj_length, trajectories, edges, boundarys = distance_limit_tlen, distance_limit_traj, distance_limit_edges, distance_limit_boundarys
 
 
-    # 单位
-    try:
-        unit = 1 / nanmax / scale
-    except:
-        unit = np.nan
-        warnings.warn('格点与投影转换有误,矢量单位将不会绘制!', UserWarning)
-
     if use_multicolor_lines:
         if norm is None:
             norm = mcolors.Normalize(color.min(), color.max())
@@ -916,8 +886,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
         # Add arrows half way along each trajectory.
         s = np.cumsum(np.sqrt(np.diff(tx) ** 2 + np.diff(ty) ** 2))
-        # 箭头方向平滑
-        # flit_index = len(tx) // 15 + 1
+
         flit_index = 5
         if len(tx) <= 10:
             flit_index = 5
@@ -927,8 +896,9 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                 break
             except:
                 continue
-        arrow_tail = (tx[-1], ty[-1])
-        arrow_head = (tx[-2], ty[-2])
+        arrow_head = np.array([tx[-1], ty[-1]])
+        arrow_tail = np.array([tx[-2], ty[-2]])
+        arrow_tail = arrow_head - (arrow_head-arrow_tail)*1e-9
 
         arrow_sizes = (0.35 + 0.65 * np.log(((np.e-1) * t_len / t_len_max) + 1)) * arrowsize
         arrow_kw['mutation_scale'] = 10 * arrow_sizes
@@ -944,43 +914,8 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
             arrow_kw['color'] = cmap(norm(color_values[n]))
         
         if (not edge):
-            if MAP:
-                p = patches.FancyArrowPatch(
-                    arrow_head, arrow_tail, transform=transform, **arrow_kw)
-            else:
-                # 将数据坐标转换为显示坐标
-                display_coords_head = axes.transData.transform(np.array([arrow_head]))
-                display_coords_tail = axes.transData.transform(np.array([arrow_tail]))
-
-                # 计算方向向量
-                direction = display_coords_head[0] - display_coords_tail[0]
-                if np.sqrt(np.sum(direction**2)) == 0:
-                    continue  # 避免零长度向量
-
-                # 标准化方向向量
-                direction = direction / np.sqrt(np.sum(direction**2))
-
-                # 设置箭头长度为arrowsize的倍数（这里使用10作为基础倍数，可以根据需要调整）
-                arrow_length = 1 * arrowsize
-
-                # 计算新的箭头尾部坐标（头部保持不变）
-                new_tail_display = display_coords_head[0] - direction * arrow_length
-
-                # 将显示坐标转回数据坐标
-                new_coords_data = axes.transData.inverted().transform(
-                    np.vstack([display_coords_head[0], new_tail_display]))
-
-                arrow_head_visual = new_coords_data[0].tolist()
-                arrow_tail_visual = new_coords_data[1].tolist()
-
-                # 使用视觉一致的坐标创建箭头
-                if arrowstyle=='tri':
-                    p = patches.FancyArrowPatch(
-                        arrow_head_visual, arrow_tail_visual, transform=transform, joinstyle="miter", capstyle="butt", **arrow_kw)
-                else:
-                    p = patches.FancyArrowPatch(
-                        arrow_head_visual, arrow_tail_visual, transform=transform, **arrow_kw)
-        # 在非碰壁情况下绘制箭头
+            p = patches.FancyArrowPatch(
+                arrow_tail, arrow_head, transform=transform, **arrow_kw)
             p.set_alpha(alpha)
             try:
                 axes.add_patch(p)
@@ -1025,7 +960,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
     ac = mcollections.PatchCollection(arrows)
     stream_container = StreamplotSet(patch, ac)
-    return stream_container, unit, nanmax, dsdx
+    return stream_container, nanmax, dsdx
 
 	
 class StreamplotSet(object):
@@ -1205,10 +1140,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
     # rescale velocity onto grid-coordinates for integrations.
     u, v = dmap.data2grid(u, v)
     nx, ny = dmap.grid.shape
-    # speed (path length) will be in axes-coordinates
-    u_ax = u / dmap.grid.nx
-    v_ax = v / dmap.grid.ny
-    speed = np.ma.sqrt(u_ax ** 2 + v_ax ** 2)
+    speed = magnitude.copy()
 
     if integration_direction in ['both', 'stick_both']:
         speed = speed / 2.
@@ -1228,7 +1160,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             except IndexError:
                 X = (x[0] + 360) * (1 - delta_x) + (x[1] + 360) * delta_x
         transform_dxdy = pyproj.Proj(transform).get_factors(X, Y)
-        scale = [transform_dxdy[1], transform_dxdy[0]]
+        scale = [transform_dxdy[1]*np.cos(np.deg2rad(Y)), transform_dxdy[0]]
         return transform_dxdy[8], transform_dxdy[9], transform_dxdy[10], transform_dxdy[11], scale
 
 
@@ -1236,17 +1168,19 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         ds_dt, _1 = interpgrid(speed, xi, yi, axes_scale=axes_scale)
         if ds_dt == 0:
             raise TerminateTrajectory()
-        dt_ds = 1. / ds_dt
         ui, _2 = interpgrid(u, xi, yi, axes_scale=axes_scale)
         vi, _3 = interpgrid(v, xi, yi, axes_scale=axes_scale)
-        du = ui * dt_ds
-        dv = vi * dt_ds
-        if not isinstance(transform, ccrs.PlateCarree):
+        du = ui
+        dv = vi
+        if isinstance(transform, ccrs.Projection):
             trs_times = transform_times(xi, yi)
             du /= trs_times[4][0]
             dv /= trs_times[4][1]
         else:
-            trs_times = [1, 1]
+            trs_times = [1, 1, 1, 1, 1]
+        _speed = (du**2 + dv**2)**0.5
+        du /= _speed
+        dv /= _speed
         return du, dv, trs_times[4], trs_times[4], _1|_2|_3
 
     def backward_time(xi, yi):
@@ -1273,12 +1207,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             ds_dt, trj_break = interpgrid(speed, xi, yi, axes_scale=axes_scale, wrap_x=MAP)
             if ds_dt == 0:
                 raise TerminateTrajectory()
-            dt_ds = 1. / ds_dt
-            du = ui * dt_ds
-            dv = vi * dt_ds
+            du = ui
+            dv = vi
             du /= trs_times_0[4][0]
             dv /= trs_times_0[4][1]
-            if not isinstance(transform, ccrs.PlateCarree):
+            if isinstance(transform, ccrs.Projection):
                 trs_times = transform_times(xi, yi)
                 J = np.array([[trs_times[0], trs_times[1]],
                             [trs_times[2], trs_times[3]]], dtype=float)
@@ -1287,6 +1220,9 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
                     raise TerminateTrajectory()
                 du, dv = trs_times_0[0]*du + trs_times_0[1]*dv, trs_times_0[2]*du + trs_times_0[3]*dv
                 du, dv = np.linalg.solve(J, np.array([du, dv], dtype=float))
+            _speed = (du ** 2 + dv ** 2) ** 0.5
+            du /= _speed
+            dv /= _speed
             return du, dv, (trs_times_0[0]**2 + trs_times_0[2]**2)**0.5, (trs_times_0[1]**2 + trs_times_0[3]**2)**0.5, trj_break
 
         def backward_time_stick(xi, yi):
@@ -1301,7 +1237,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             else: dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['both', 'backward']:
-                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, magnitude, axes_scale=[False, False], wrap_x=MAP)
+                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time, speed, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
@@ -1310,7 +1246,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
             if integration_direction in ['both', 'forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, magnitude, axes_scale=[False, False], wrap_x=MAP)
+                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time, speed, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
@@ -1322,7 +1258,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             else: dmap.start_trajectory(x0, y0)
 
             if integration_direction in ['stick_both', 'stick_backward']:
-                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, magnitude, axes_scale=[False, False], wrap_x=MAP)
+                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, backward_time_stick, speed, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 x_traj += x_traj_[::-1]
                 y_traj += y_traj_[::-1]
@@ -1331,7 +1267,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
 
             if integration_direction in ['stick_both', 'stick_forward']:
                 dmap.reset_start_point(x0, y0)
-                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, magnitude, axes_scale=[False, False], wrap_x=MAP)
+                stotal_, x_traj_, y_traj_, hit_edge_, hit_boundary_ = _integrate_rk12(x0, y0, dmap, forward_time_stick, speed, axes_scale=[False, False], wrap_x=MAP)
                 stotal += stotal_
                 x_traj += x_traj_[1:]
                 y_traj += y_traj_[1:]
@@ -1375,7 +1311,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
     # This error is below that needed to match the RK4 integrator. It
     # is set for visual reasons -- too low and corners start
     # appearing ugly and jagged. Can be tuned.
-    maxerror = 2e-4
+    maxerror = 0.1
 
     # This limit is important (for all integrators) to avoid the
     # trajectory skipping some mask cells. We could relax this
@@ -1383,7 +1319,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
     # increment the location gradually. However, due to the efficient
     # nature of the interpolation, this doesn't boost speed by much
     # for quite a bit of complexity.
-    maxds = min(1. / dmap.mask.nx, 1. / dmap.mask.ny, 6e-4)
+    maxds = max(1. / dmap.mask.nx, 1. / dmap.mask.ny, 0.15)
 
     ds = maxds
     stotal = 0
@@ -1711,9 +1647,17 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     axes_sub.set_ylim(-2, 1)
     for spine in axes_sub.spines.values():
         spine.set_edgecolor(edgecolor)
-    ds_dx = quiver[3]
-    pts_times = (axes_sub.transData.transform((1, 0)) - axes_sub.transData.transform((0, 0)))[0]
-    U_times = 1 / ds_dx / pts_times / shrink / 2
+    ds_dx = quiver[2]
+    try:
+        if isinstance(axes.projection, ccrs.Projection):
+            axes_Y0 = (axes.get_extent()[2] + axes.get_extent()[3]) / 2
+            axes_distance = (pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(axes.get_extent()[1], axes_Y0)
+                             - pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(axes.get_extent()[0], axes_Y0))
+    except:
+        axes_Y0 = (axes.get_ylim()[0] + axes.get_ylim()[1]) / 2
+        axes_distance = (axes.transData.transform((axes.get_xlim()[1], axes_Y0)) - axes.transData.transform((axes.get_xlim()[0], axes_Y0)))[0]
+    pts_times =  (axes_sub.get_xlim()[1] - axes_sub.get_xlim()[0]) / axes_distance
+    U_times = ds_dx * pts_times / shrink / 2
     U_trans = U * U_times
     # 绘制图例
     x, y = U_trans * np.cos(angle) / width_shrink, U_trans * np.sin(angle) / height_shrink
@@ -1736,7 +1680,7 @@ if __name__ == '__main__':
     Y, X = np.meshgrid(y, x)
 
     U = np.linspace(1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
-    V = np.linspace(0, 0, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
+    V = np.linspace(1, 1, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
     speed = np.where((U**2 + V**2)<0.2, True, False)
     # 创建掩码UV
     U = np.ma.array(U, mask=speed)
@@ -1745,13 +1689,15 @@ if __name__ == '__main__':
     fig = matplotlib.pyplot.figure()
     ax1 = fig.add_subplot(121, projection=ccrs.Orthographic(central_longitude=115))
     ax1.set_global()
+    # 添加经纬度
+    ax1.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
     # 海洋填色为蓝色
     ax1.add_feature(cfeature.OCEAN.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.LAND.with_scale('110m'), facecolor='lightgreen')
     ax1.add_feature(cfeature.LAKES.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.RIVERS.with_scale('110m'), edgecolor='lightblue')
-    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=70, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.1, 0.2],
-                     arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='stick_both', transform=ccrs.PlateCarree())
-    a1.key(U=1, shrink=0.1)
+    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.2, 0.5],
+                     arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='both', transform=ccrs.PlateCarree())
+    a1.key(U=1.414, shrink=0.1)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
     plt.show()
