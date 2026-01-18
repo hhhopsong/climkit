@@ -1172,20 +1172,18 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         vi, _3 = interpgrid(v, xi, yi, axes_scale=axes_scale)
         du = ui
         dv = vi
+        _speed = (du**2 + dv**2)**0.5
+        du /= _speed
+        dv /= _speed
         if isinstance(transform, ccrs.Projection):
             trs_times = transform_times(xi, yi)
             du /= trs_times[4][0]
             dv /= trs_times[4][1]
-        else:
-            trs_times = [1, 1, 1, 1, 1]
-        _speed = (du**2 + dv**2)**0.5
-        du /= _speed
-        dv /= _speed
-        return du, dv, trs_times[4], trs_times[4], _1|_2|_3
+        return du, dv, _1|_2|_3
 
     def backward_time(xi, yi):
-        dxi, dyi, trs_times0, trs_times1, trj_break = forward_time(xi, yi)
-        return -dxi, -dyi, trs_times0, trs_times1, trj_break
+        dxi, dyi, trj_break = forward_time(xi, yi)
+        return -dxi, -dyi, trj_break
 
     def integrate(x0, y0):
         """Return x, y grid-coordinates of trajectory based on starting point.
@@ -1209,10 +1207,13 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
                 raise TerminateTrajectory()
             du = ui
             dv = vi
-            du /= trs_times_0[4][0]
-            dv /= trs_times_0[4][1]
+            _speed = (du ** 2 + dv ** 2) ** 0.5
+            du /= _speed
+            dv /= _speed
             if isinstance(transform, ccrs.Projection):
                 trs_times = transform_times(xi, yi)
+                du /= trs_times[4][0]
+                dv /= trs_times[4][1]
                 J = np.array([[trs_times[0], trs_times[1]],
                             [trs_times[2], trs_times[3]]], dtype=float)
                 det = np.linalg.det(J)
@@ -1220,14 +1221,11 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
                     raise TerminateTrajectory()
                 du, dv = trs_times_0[0]*du + trs_times_0[1]*dv, trs_times_0[2]*du + trs_times_0[3]*dv
                 du, dv = np.linalg.solve(J, np.array([du, dv], dtype=float))
-            _speed = (du ** 2 + dv ** 2) ** 0.5
-            du /= _speed
-            dv /= _speed
-            return du, dv, (trs_times_0[0]**2 + trs_times_0[2]**2)**0.5, (trs_times_0[1]**2 + trs_times_0[3]**2)**0.5, trj_break
+            return du, dv, trj_break
 
         def backward_time_stick(xi, yi):
-            dxi, dyi, trs_times0, trs_times1, trj_break = forward_time_stick(xi, yi)
-            return -dxi, -dyi, trs_times0, trs_times1, trj_break
+            dxi, dyi, trj_break = forward_time_stick(xi, yi)
+            return -dxi, -dyi, trj_break
 
 
         stotal, x_traj, y_traj, m_total, hit_edge, hit_boundary = 0., [], [], [], [False, False], [False, False]
@@ -1319,7 +1317,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
     # increment the location gradually. However, due to the efficient
     # nature of the interpolation, this doesn't boost speed by much
     # for quite a bit of complexity.
-    maxds = max(1. / dmap.mask.nx, 1. / dmap.mask.ny, 0.15)
+    maxds = max(1. / dmap.mask.nx, 1. / dmap.mask.ny, 0.4)
 
     ds = maxds
     stotal = 0
@@ -1342,8 +1340,8 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
         if not dmap.grid.within_grid(nx, yi): break
 
         try:
-            k1x, k1y, trs_x, trs_y, trj_break = f(xi, yi)
-            k2x, k2y, _, _, trj_break = f(xi + ds * k1x,
+            k1x, k1y, trj_break = f(xi, yi)
+            k2x, k2y, trj_break = f(xi + ds * k1x,
                                                 yi + ds * k1y)
             if trj_break:
                 break
@@ -1408,7 +1406,7 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     ny, nx = dmap.grid.shape
     xi = xf_traj[-1]
     yi = yf_traj[-1]
-    cx, cy, trs_x, trs_y, trj_break = f(xi, yi)
+    cx, cy, trj_break = f(xi, yi)
     if cx == 0:
         dsx = np.inf
     elif cx < 0:
@@ -1624,6 +1622,56 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
 
     :return: None
     '''
+
+    def calculate_projection_lon_range(ax):
+        """
+        计算 Cartopy Axes 投影边界对应的经度范围。
+        """
+        # 1. 获取投影对象
+        proj = ax.projection
+
+        # 2. 获取边界几何体 (Shapely Object)
+        # boundary 通常是一个 Polygon 或 LinearRing
+        boundary_geom = proj.boundary
+
+        # 3. 提取边界上的所有点 (x, y)
+        # 注意：如果是 MultiPolygon，逻辑会更复杂，这里假设是单连通区域
+        if isinstance(boundary_geom, shapely.geometry.Polygon):
+            boundary_coords = np.array(boundary_geom.exterior.coords)
+        elif isinstance(boundary_geom, shapely.geometry.LinearRing):
+            boundary_coords = np.array(boundary_geom.coords)
+        else:
+            raise ValueError(f"未知的边界几何类型: {type(boundary_geom)}")
+
+        x_coords = boundary_coords[:, 0]
+        y_coords = boundary_coords[:, 1]
+
+        # 4. 构建 Transformer
+        # 使用 proj4_init 字符串或直接使用 Cartopy CRS 对象
+        # 源坐标系：ax.projection
+        # 目标坐标系：EPSG:4326 (WGS84 Lat/Lon)
+        transformer = pyproj.Transformer.from_crs(
+            crs_from=proj,
+            crs_to="EPSG:4326",
+            always_xy=True  # 确保返回顺序是 (lon, lat)
+        )
+
+        # 5. 执行坐标反算
+        # 注意：某些投影边缘可能产生无限值或 NaN，建议进行过滤
+        try:
+            lons, lats = transformer.transform(x_coords, y_coords)
+        except Exception as e:
+            print(f"变换过程中出现错误: {e}")
+            return None
+
+        # 6. 计算经度范围 (Min/Max)
+        # 这一步需要非常小心日界线 (Dateline) 问题
+        min_lon = np.nanmin(lons)
+        max_lon = np.nanmax(lons)
+
+        return min_lon, max_lon, lons, lats
+
+
     if bbox_to_anchor is not None:
         axes_sub = inset_axes(
                     axes,
@@ -1650,9 +1698,13 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     ds_dx = quiver[2]
     try:
         if isinstance(axes.projection, ccrs.Projection):
-            axes_Y0 = (axes.get_extent()[2] + axes.get_extent()[3]) / 2
-            axes_distance = (pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(axes.get_extent()[1], axes_Y0)
-                             - pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(axes.get_extent()[0], axes_Y0))
+            lon_min, lon_max, _, _ = calculate_projection_lon_range(axes)
+            if abs(lon_min-lon_max)<1e-5:
+                axes_distance = 360
+            elif lon_max < lon_min:
+                axes_distance = lon_max + 360 - lon_min
+            else:
+                axes_distance = lon_max - lon_min
     except:
         axes_Y0 = (axes.get_ylim()[0] + axes.get_ylim()[1]) / 2
         axes_distance = (axes.transData.transform((axes.get_xlim()[1], axes_Y0)) - axes.transData.transform((axes.get_xlim()[0], axes_Y0)))[0]
@@ -1680,14 +1732,14 @@ if __name__ == '__main__':
     Y, X = np.meshgrid(y, x)
 
     U = np.linspace(1, 1, X.shape[0])[np.newaxis, :] * np.ones(X.shape).T
-    V = np.linspace(1, 1, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
+    V = np.linspace(0, 0, X.shape[1])[:, np.newaxis] * np.ones(X.shape).T
     speed = np.where((U**2 + V**2)<0.2, True, False)
     # 创建掩码UV
     U = np.ma.array(U, mask=speed)
     V = np.ma.array(V, mask=speed)
     #####
     fig = matplotlib.pyplot.figure()
-    ax1 = fig.add_subplot(121, projection=ccrs.Orthographic(central_longitude=115))
+    ax1 = fig.add_subplot(121, projection=ccrs.NorthPolarStereo(central_longitude=115))
     ax1.set_global()
     # 添加经纬度
     ax1.gridlines(draw_labels=True, linewidth=0.5, color='gray', alpha=0.5, linestyle='--')
@@ -1696,8 +1748,8 @@ if __name__ == '__main__':
     ax1.add_feature(cfeature.LAND.with_scale('110m'), facecolor='lightgreen')
     ax1.add_feature(cfeature.LAKES.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.RIVERS.with_scale('110m'), edgecolor='lightblue')
-    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.2, 0.5],
+    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=5, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.2, 0.1],
                      arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='both', transform=ccrs.PlateCarree())
-    a1.key(U=1.414, shrink=0.1)
+    a1.key(U=1, shrink=0.1)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
     plt.show()
