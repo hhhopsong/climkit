@@ -1623,54 +1623,16 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     :return: None
     '''
 
-    def calculate_projection_lon_range(ax):
-        """
-        计算 Cartopy Axes 投影边界对应的经度范围。
-        """
-        # 1. 获取投影对象
-        proj = ax.projection
-
-        # 2. 获取边界几何体 (Shapely Object)
-        # boundary 通常是一个 Polygon 或 LinearRing
-        boundary_geom = proj.boundary
-
-        # 3. 提取边界上的所有点 (x, y)
-        # 注意：如果是 MultiPolygon，逻辑会更复杂，这里假设是单连通区域
-        if isinstance(boundary_geom, shapely.geometry.Polygon):
-            boundary_coords = np.array(boundary_geom.exterior.coords)
-        elif isinstance(boundary_geom, shapely.geometry.LinearRing):
-            boundary_coords = np.array(boundary_geom.coords)
-        else:
-            raise ValueError(f"未知的边界几何类型: {type(boundary_geom)}")
-
-        x_coords = boundary_coords[:, 0]
-        y_coords = boundary_coords[:, 1]
-
-        # 4. 构建 Transformer
-        # 使用 proj4_init 字符串或直接使用 Cartopy CRS 对象
-        # 源坐标系：ax.projection
-        # 目标坐标系：EPSG:4326 (WGS84 Lat/Lon)
-        transformer = pyproj.Transformer.from_crs(
-            crs_from=proj,
-            crs_to="EPSG:4326",
-            always_xy=True  # 确保返回顺序是 (lon, lat)
-        )
-
-        # 5. 执行坐标反算
-        # 注意：某些投影边缘可能产生无限值或 NaN，建议进行过滤
-        try:
-            lons, lats = transformer.transform(x_coords, y_coords)
-        except Exception as e:
-            print(f"变换过程中出现错误: {e}")
-            return None
-
-        # 6. 计算经度范围 (Min/Max)
-        # 这一步需要非常小心日界线 (Dateline) 问题
-        min_lon = np.nanmin(lons)
-        max_lon = np.nanmax(lons)
-
-        return min_lon, max_lon, lons, lats
-
+    def scale_ratio_to_plate(ax, lon, lat, dlon_deg=1e-4):
+        """在 (lon,lat) 处，测量 Δlon=dlon_deg 对应的屏幕像素长度"""
+        x0, y0 = ax.projection.transform_point(lon, lat, ccrs.PlateCarree())
+        x1, y1 = ax.projection.transform_point(lon + dlon_deg, lat, ccrs.PlateCarree())
+        p0 = ax.transData.transform((x0, y0))
+        p1 = ax.transData.transform((x1, y1))
+        proj_tgt = pyproj.Proj(ax.projection.proj4_params)
+        ft = proj_tgt.get_factors(lon, lat)
+        dx, dy = p1 - p0
+        return float(np.hypot(*(dx, dy)) / np.cos(np.deg2rad(lat)) / dlon_deg / ft.parallel_scale)
 
     if bbox_to_anchor is not None:
         axes_sub = inset_axes(
@@ -1698,13 +1660,22 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     ds_dx = quiver[2]
     try:
         if isinstance(axes.projection, ccrs.Projection):
-            lon_min, lon_max, _, _ = calculate_projection_lon_range(axes)
-            if abs(lon_min-lon_max)<1e-5:
-                axes_distance = 360
-            elif lon_max < lon_min:
-                axes_distance = lon_max + 360 - lon_min
+            x0, x1 = axes.get_xlim()
+            y0, y1 = axes.get_ylim()
+            lon, lat = pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform((x0+x1)/2, (y0+y1)/2)
+            if abs(lat)!=90.:
+                rat = scale_ratio_to_plate(axes, lon, lat)
             else:
-                axes_distance = lon_max - lon_min
+                for i in np.arange(-89.9, 89.9, 0.1):
+                    try:
+                        rat = scale_ratio_to_plate(axes, lon, i)
+                        break
+                    except:
+                        rat = np.nan
+                        continue
+            if np.isfinite(rat): warnings.warn('矢量图例未能成功绘制，底图参考点获取异常')
+            axes_distance = (axes.transData.transform((x1, (y0+y1)/2)) - axes.transData.transform((x0, (y0+y1)/2)))[0]
+            axes_distance /= rat
     except:
         axes_Y0 = (axes.get_ylim()[0] + axes.get_ylim()[1]) / 2
         axes_distance = (axes.transData.transform((axes.get_xlim()[1], axes_Y0)) - axes.transData.transform((axes.get_xlim()[0], axes_Y0)))[0]
@@ -1748,7 +1719,7 @@ if __name__ == '__main__':
     ax1.add_feature(cfeature.LAND.with_scale('110m'), facecolor='lightgreen')
     ax1.add_feature(cfeature.LAKES.with_scale('110m'), facecolor='lightblue')
     ax1.add_feature(cfeature.RIVERS.with_scale('110m'), edgecolor='lightblue')
-    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=5, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.2, 0.1],
+    a1 = ax1.Curlyquiver(x, y, U, V, regrid=20, scale=10, color='k', linewidth=0.8, arrowsize=1, MinDistance=[0.2, 0.1],
                      arrowstyle='v', thinning=['0%', 'min'], alpha=0.9, zorder=100, integration_direction='both', transform=ccrs.PlateCarree())
     a1.key(U=1, shrink=0.1)
     ax1.add_feature(cfeature.COASTLINE.with_scale('110m'), linewidth=0.5, color='#959595')
