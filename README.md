@@ -1,7 +1,4 @@
-<p align="center">
-  <img src="docs/logo.pdf" alt="ClimKit logo" width="200" />
-</p>
-# 📘 ClimKit — A Climate Data Analysis Toolkit
+v# 📘 ClimKit — A Climate Data Analysis Toolkit
 
 **ClimKit** 是一个用于气候数据及绘图的 Python 工具集。它包含多种常用数据处理工具，例如波谱分析、温度收支、矢量场可视化等，适用于科研人员、地球科学研究者及数据分析工程师。
 
@@ -128,7 +125,7 @@ import matplotlib.pyplot as plt
 
 fig = plt.figure()
 ax = fig.add_subplot(projection=*)
-Curlyquiver(ax, x, y, U, V)
+ax.Curlyquiver(x, y, U, V)
 plt.show()
 ```
 
