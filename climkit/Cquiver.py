@@ -368,7 +368,7 @@ class Curlyquiver:
                         self.NanMax, self.center_lon, self.thinning, self.MinDistance, self.alpha)
 
     def key(self, U=1., shrink=0.15, angle=0., label='1', fontproperties={'size': 5},
-            width_shrink=1., height_shrink=1., edgecolor='k', arrowsize=None, linewidth=None, color=None, loc="upper right", bbox_to_anchor=None):
+            width_shrink=1., height_shrink=1., edgecolor='k', edgewidth=1.2,arrowsize=None, linewidth=None, color=None, loc="upper right", bbox_to_anchor=None):
         '''
         曲线矢量图例
         :param fig: 画布总底图
@@ -383,6 +383,7 @@ class Curlyquiver:
         :param width_shrink: 宽度缩放比例
         :param height_shrink: 高度缩放比例
         :param edgecolor: 边框颜色
+        :param edgewidth: 边框线宽
 
         :return: None
         '''
@@ -391,7 +392,7 @@ class Curlyquiver:
         color = color if color is not None else self.color
         velovect_key(axes=self.axes, quiver=self.quiver, shrink=shrink, U=U, angle=angle, label=label, color=color, arrowstyle=self.arrowstyle,
                      linewidth=linewidth, fontproperties=fontproperties, loc=loc, bbox_to_anchor=bbox_to_anchor, width_shrink=width_shrink,
-                     height_shrink=height_shrink, arrowsize=arrowsize, edgecolor=edgecolor)
+                     height_shrink=height_shrink, arrowsize=arrowsize, edgecolor=edgecolor, edgewidth=edgewidth)
 
 
 def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
@@ -1601,7 +1602,8 @@ def _line_out_(p1, p2, threshold):
 
 
 def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='v', linewidth=.5,
-                 fontproperties={'size': 5}, loc="upper right", bbox_to_anchor=None, width_shrink=1., height_shrink=1., arrowsize=1., edgecolor='k'):
+                 fontproperties={'size': 5}, loc="upper right", bbox_to_anchor=None, width_shrink=1., height_shrink=1.,
+                 arrowsize=1., edgecolor='k', edgewidth=1.2):
     '''
     曲线矢量图例
     :param axes: 目标图层
@@ -1656,7 +1658,9 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
     axes_sub.set_xlim(-1, 1)
     axes_sub.set_ylim(-2, 1)
     for spine in axes_sub.spines.values():
+        spine.set_visible(True)
         spine.set_edgecolor(edgecolor)
+        spine.set_linewidth(edgewidth)
     ds_dx = quiver[2]
     try:
         if isinstance(axes.projection, ccrs.Projection):
@@ -1680,7 +1684,7 @@ def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k'
         axes_Y0 = (axes.get_ylim()[0] + axes.get_ylim()[1]) / 2
         axes_distance = (axes.transData.transform((axes.get_xlim()[1], axes_Y0)) - axes.transData.transform((axes.get_xlim()[0], axes_Y0)))[0]
     pts_times =  (axes_sub.get_xlim()[1] - axes_sub.get_xlim()[0]) / axes_distance
-    U_times = ds_dx * pts_times / shrink / 2
+    U_times = ds_dx * pts_times / shrink / 2 if bbox_to_anchor is None else ds_dx * pts_times / bbox_to_anchor[2] / 2
     U_trans = U * U_times
     # 绘制图例
     x, y = U_trans * np.cos(angle) / width_shrink, U_trans * np.sin(angle) / height_shrink
