@@ -458,6 +458,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
     except AttributeError:
         PROJ = "DATA"
     center_lon = 0 if not isinstance(PROJ, ccrs.PlateCarree) else center_lon
+    center_lon = center_lon if PROJ=="DATA" else 0
 
     # 获取axes范围
     try:
@@ -676,16 +677,16 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
         y_draw_delta = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], regrid_y, retstep=True)[1]
         MinDistance[0] *= abs(x_draw_delta)
         if REGRID_LEN == 2:
-            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
-            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
+            x_draw = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], int(round((axes.get_xlim()[1]-axes.get_xlim()[0])/x_draw_delta))+1)
+            y_draw = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], int(round((axes.get_ylim()[1]-axes.get_ylim()[0])/y_draw_delta))+1)
         elif abs(x_draw_delta) < abs(y_draw_delta):
             SIGNAL_X, SIGNAL_Y = x_draw_delta / abs(x_draw_delta), y_draw_delta / abs(y_draw_delta)
-            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], abs(x_draw_delta)*SIGNAL_X)
-            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], abs(x_draw_delta)*SIGNAL_Y)
+            x_draw = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], int(round((axes.get_xlim()[1]-axes.get_xlim()[0])/abs(x_draw_delta)*SIGNAL_X))+1)
+            y_draw = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], int(round((axes.get_ylim()[1]-axes.get_ylim()[0])/abs(x_draw_delta)*SIGNAL_Y))+1)
         else:
             SIGNAL_X, SIGNAL_Y = x_draw_delta / abs(x_draw_delta), y_draw_delta / abs(y_draw_delta)
-            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], abs(y_draw_delta)*SIGNAL_X)
-            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], abs(y_draw_delta)*SIGNAL_Y)
+            x_draw = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], int(round((axes.get_xlim()[1]-axes.get_xlim()[0])/abs(y_draw_delta)*SIGNAL_X))+1)
+            y_draw = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], int(round((axes.get_ylim()[1]-axes.get_ylim()[0])/abs(y_draw_delta)*SIGNAL_Y))+1)
 
     # 处理超出-180~180范围的经度
     # if MAP:
