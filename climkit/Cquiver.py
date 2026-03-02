@@ -453,7 +453,11 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
     if center_lon < -180 or center_lon > 360:
         raise ValueError('center_lon 的范围必须在-180~360之间。')
     center_lon = center_lon + 360 if center_lon < 0 else center_lon
-    center_lon = 0 if not isinstance(axes.projection, ccrs.PlateCarree) else center_lon
+    try:
+        PROJ = axes.projection
+    except AttributeError:
+        PROJ = "DATA"
+    center_lon = 0 if not isinstance(PROJ, ccrs.PlateCarree) else center_lon
 
     # 获取axes范围
     try:
@@ -539,14 +543,14 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                 (y_1degree[::int(regrid_reso // 1)], (x_1degree + cent_flt)[::int(regrid_reso // 1)]), v_1degree,
                 method='linear', bounds_error=True)
         else:
-            x = np.arange(x[0], x[-1] + 1e-5, regrid_reso)
-            y = np.arange(y[0], y[-1] + 1e-5, regrid_reso*5.5556)
+            x = np.arange(x[0], x[-1] + regrid_reso/2, regrid_reso)
+            y = np.arange(y[0], y[-1] + regrid_reso/2, regrid_reso)
             U = RegularGridInterpolator(
                 (y_1degree, (x_1degree + cent_flt)), u_1degree,
-                method='linear', bounds_error=True)
+                method='linear', bounds_error=False)
             V = RegularGridInterpolator(
                 (y_1degree, (x_1degree + cent_flt)), v_1degree,
-                method='linear', bounds_error=True)
+                method='linear', bounds_error=False)
         ## 裁剪绘制区域的数据->得到正确的regird
         if REGRID_LEN == 2:
             regrid_x = regrid[0]
@@ -646,7 +650,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
     v = np.ma.masked_invalid(v)
     magnitude = np.ma.sqrt(u**2 + v**2)
 
-    integrate = get_integrator(u, v, x, y, dmap, magnitude, integration_direction=integration_direction, axes_scale=[is_x_log, is_y_log], transform=axes.projection)
+    integrate = get_integrator(u, v, x, y, dmap, magnitude, integration_direction=integration_direction, axes_scale=[is_x_log, is_y_log], transform=PROJ)
     trajectories = []
     edges = []
     boundarys = []
@@ -712,10 +716,11 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
                 X_re = X_re[mask_]
                 Y_re = Y_re[mask_]
             start_points = np.array([X_re.flatten(), Y_re.flatten()]).T
-            start_points_trs = pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(start_points[:, 0], start_points[:, 1])
-            start_points[:, 1] = start_points_trs[1]
-            start_points[:, 0] = start_points_trs[0]
-            del start_points_trs
+            if MAP:
+                start_points_trs = pyproj.Transformer.from_crs(axes.projection, "EPSG:4326", always_xy=True).transform(start_points[:, 0], start_points[:, 1])
+                start_points[:, 1] = start_points_trs[1]
+                start_points[:, 0] = start_points_trs[0]
+                del start_points_trs
         else:
             warnings.warn('绘制点未成功插值为六边形: start_points 为 "interleaved" 时, regrid 的值必须非 False', UserWarning)
             start_points=_gen_starting_points(x,y,grains)
@@ -1177,7 +1182,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         du /= _speed
         dv /= _speed
         if isinstance(transform, ccrs.Projection):
-            trs_times = transform_times(xi, yi)
+            trs_times = transform_times(xi, yi) if MAP else [1, 0, 0, 1, [1, 1]]
             du /= trs_times[4][0]
             dv /= trs_times[4][1]
         return du, dv, _1|_2|_3
@@ -1198,7 +1203,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
         if integration_direction in ['stick_both', 'stick_backward', 'stick_forward']:
             ui, _ = interpgrid(u, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
             vi, _ = interpgrid(v, x0, y0, axes_scale=axes_scale, wrap_x=MAP)
-            trs_times_0 = transform_times(x0, y0)
+            trs_times_0 = transform_times(x0, y0) if MAP else [1, 0, 0, 1, [1, 1]]
         else:
             ui, vi = None, None
 
@@ -1212,7 +1217,7 @@ def get_integrator(u, v, x, y, dmap, magnitude, integration_direction='both', ax
             du /= _speed
             dv /= _speed
             if isinstance(transform, ccrs.Projection):
-                trs_times = transform_times(xi, yi)
+                trs_times = transform_times(xi, yi) if MAP else [1, 0, 0, 1, [1, 1]]
                 du /= trs_times[4][0]
                 dv /= trs_times[4][1]
                 J = np.array([[trs_times[0], trs_times[1]],
@@ -1338,7 +1343,7 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
 
         _, hit_boundary = interpgrid(magnitude, xi, yi, axes_scale=axes_scale, wrap_x=wrap_x)
         if hit_boundary: break
-        if not dmap.grid.within_grid(nx, yi): break
+        if not dmap.grid.within_grid(xi, yi): break
 
         try:
             k1x, k1y, trj_break = f(xi, yi)
