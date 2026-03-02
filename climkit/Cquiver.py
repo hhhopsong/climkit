@@ -672,23 +672,20 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
     if not is_x_log and not is_y_log:
         # 只有在两个轴都是线性时才应用原来的逻辑
-        if MAP:
-            x_draw_delta = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], regrid_x, retstep=True)[1]
-            y_draw_delta = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], regrid_y, retstep=True)[1]
-            MinDistance[0] *= x_draw_delta
-            if REGRID_LEN == 2:
-                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
-                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
-            elif x_draw_delta < y_draw_delta:
-                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
-                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], x_draw_delta)
-            else:
-                x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], y_draw_delta)
-                y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
+        x_draw_delta = np.linspace(axes.get_xlim()[0], axes.get_xlim()[1], regrid_x, retstep=True)[1]
+        y_draw_delta = np.linspace(axes.get_ylim()[0], axes.get_ylim()[1], regrid_y, retstep=True)[1]
+        MinDistance[0] *= abs(x_draw_delta)
+        if REGRID_LEN == 2:
+            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], x_draw_delta)
+            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], y_draw_delta)
+        elif abs(x_draw_delta) < abs(y_draw_delta):
+            SIGNAL_X, SIGNAL_Y = x_draw_delta / abs(x_draw_delta), y_draw_delta / abs(y_draw_delta)
+            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], abs(x_draw_delta)*SIGNAL_X)
+            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], abs(x_draw_delta)*SIGNAL_Y)
         else:
-            x_draw = x
-            y_draw = y
-            MinDistance[0] *= x[1] - x[0]
+            SIGNAL_X, SIGNAL_Y = x_draw_delta / abs(x_draw_delta), y_draw_delta / abs(y_draw_delta)
+            x_draw = np.arange(axes.get_xlim()[0], axes.get_xlim()[1], abs(y_draw_delta)*SIGNAL_X)
+            y_draw = np.arange(axes.get_ylim()[0], axes.get_ylim()[1], abs(y_draw_delta)*SIGNAL_Y)
 
     # 处理超出-180~180范围的经度
     # if MAP:
@@ -822,12 +819,12 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
     if MinDistance[0] > 0 and MinDistance[1] < 1:
         _trajectories = trajectories.copy()
-        TRS_lonlat2proj = pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True)
+        TRS_lonlat2proj = pyproj.Transformer.from_crs("EPSG:4326", axes.projection, always_xy=True) if MAP else None
         for i in range(len(trajectories)):
             _tx_, _ty_ = dmap.grid2data(*np.array(_trajectories[i]))
             _tx_ += grid.x_origin
             _ty_ += grid.y_origin
-            _trajectories[i] = TRS_lonlat2proj.transform(_tx_, _ty_)
+            _trajectories[i] = TRS_lonlat2proj.transform(_tx_, _ty_) if MAP else [_tx_, _ty_]
             # Debug 越边界判定范围异常问题
             _trajectories[i] = np.array([_unwrap_if_jump(_trajectories[i][0]), np.asarray(_trajectories[i][1], np.float64)])
             _trajectories[i] = _trajectories[i][:, np.all(np.isfinite(_trajectories[i]), axis=0)]
