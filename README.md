@@ -1,4 +1,7 @@
-v# 📘 ClimKit — A Climate Data Analysis Toolkit
+<p align="center">
+  <img src="docs/logo.png" alt="ClimKit logo" width="200" />
+</p>
+# 📘 ClimKit — A Climate Data Analysis Toolkit
 
 **ClimKit** 是一个用于气候数据及绘图的 Python 工具集。它包含多种常用数据处理工具，例如波谱分析、温度收支、矢量场可视化等，适用于科研人员、地球科学研究者及数据分析工程师。
 
@@ -82,7 +85,7 @@ ClimKit 提供以下核心功能模块：
 位于 `climkit.force_file`
 
 * 制作NetCDF格式的LBM强迫数据
-* 目前仅支持T42 & 垂直20层配置下的LBM
+* 目前仅支持T42L20配置下的LBM
 
 ---
 
@@ -131,9 +134,6 @@ plt.show()
 
 ---
 
-## 🛠 其他
-
-项目包含 Pytorch 代码用于GPU加速（可选）。
 
 
 
