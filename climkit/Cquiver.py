@@ -876,6 +876,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
 
     streamlines = []
     arrows = []
+    lines = []
     t_len_max = np.nanmax(traj_length)
     for t_len, t, edge, boundary in zip(traj_length, trajectories, edges, boundarys):
         tgx = np.array(t[0])
@@ -890,8 +891,7 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
         if is_x_log: tx = 10 ** tx
         if is_y_log: ty = 10 ** ty
 
-        points = np.transpose([tx, ty]).reshape(-1, 1, 2)
-        streamlines.extend(np.hstack([points[:-1], points[1:]]))
+        streamlines.append(np.transpose([tx, ty]).reshape(-1, 2))
 
         # Add arrows half way along each trajectory.
         s = np.cumsum(np.sqrt(np.diff(tx) ** 2 + np.diff(ty) ** 2))
@@ -941,17 +941,66 @@ def velovect(axes, x, y, u, v, linewidth=.5,    color='black',
     verts, codes = [], []
     for sl in streamlines:
         sl = np.asarray(sl)
-        if sl.size == 0:
+        n = len(sl)
+        if n == 0:
             continue
-        verts.append(sl[0])
-        codes.append(Path.MOVETO)
-        verts.extend(sl[1:])
-        codes.extend([Path.LINETO] * (len(sl) - 1))
+        elif n < 3: # 小于三 绘制线段
+            verts.append(sl[0])
+            codes.append(Path.MOVETO)
+            verts.extend(sl[1:])
+            codes.extend([Path.LINETO] * (n - 1))
+        else: # 大于等于三 绘制贝塞尔曲线
+            # 每个点的切向量
+            m = np.zeros_like(sl)
+            # 内点：中心差分
+            tension = 1
+            for i in range(1, n - 1):
+                prev_seg = sl[i] - sl[i - 1]
+                next_seg = sl[i + 1] - sl[i]
+                v = 0.5 * tension * (prev_seg + next_seg)
+
+                nv = np.linalg.norm(v)
+                max_len = 0.8 * min(np.linalg.norm(prev_seg), np.linalg.norm(next_seg))
+                if nv > 1e-12 and max_len > 1e-12 and nv > max_len:
+                    v = v * (max_len / nv)
+                m[i] = v
+            # 端点：单边差分
+            m[0] = tension * (sl[1] - sl[0])
+            m[-1] = tension * (sl[-1] - sl[-2])
+
+            verts.append(sl[0])
+            codes.append(Path.MOVETO)
+
+            # 每段 P_i -> P_{i+1} 转成 cubic Bézier
+            for i in range(n - 1):
+                p0 = sl[i]
+                p1 = sl[i + 1]
+
+                # Hermite -> Bézier
+                c1 = p0 + m[i] / 3.0
+                c2 = p1 - m[i + 1] / 3.0
+
+                seg_len = np.linalg.norm(p1 - p0)
+                max_handle = 0.35 * seg_len
+
+                h1 = c1 - p0
+                h2 = c2 - p1
+
+                h1_len = np.linalg.norm(h1)
+                h2_len = np.linalg.norm(h2)
+
+                if h1_len > 1e-12 and h1_len > max_handle:
+                    c1 = p0 + h1 * (max_handle / h1_len)
+                if h2_len > 1e-12 and h2_len > max_handle:
+                    c2 = p1 + h2 * (max_handle / h2_len)
+
+                verts.extend([c1, c2, p1])
+                codes.extend([Path.CURVE4]*3)
 
     path = Path(np.asarray(verts, float), codes)
     patch = PathPatch(
         path,
-        facecolor=line_kw.get("color", "C0"),
+        facecolor='none',
         edgecolor=line_kw.get("color", "C0"),
         lw=line_kw.get("linewidth", 1.0),
         capstyle='round',
@@ -1041,7 +1090,6 @@ class DomainMap(object):
 
     def undo_trajectory(self):
         self.mask._undo_trajectory()
-        
 
 class Grid(object):
     """Grid of data."""
@@ -1138,7 +1186,6 @@ class StreamMask(object):
         self._current_xy = (xm, ym)
         #    else:
         #        raise InvalidIndexError
-
 
 # Integrator definitions
 #========================
@@ -1409,7 +1456,6 @@ def _integrate_rk12(x0, y0, dmap, f, magnitude, axes_scale=[False, False], wrap_
 
     return stotal, xf_traj, yf_traj, hit_edge, hit_boundary
 
-
 def _euler_step(xf_traj, yf_traj, dmap, f):
     """Simple Euler integration step that extends streamline to boundary."""
     ny, nx = dmap.grid.shape
@@ -1432,7 +1478,6 @@ def _euler_step(xf_traj, yf_traj, dmap, f):
     xf_traj.append(xi + cx * ds)
     yf_traj.append(yi + cy * ds)
     return ds, xf_traj, yf_traj, cx * ds, cy * ds
-
 
 def interpgrid(a, xi, yi, axes_scale=[False, False], wrap_x=True):
     """Fast 2D, linear interpolation on an integer grid/整数网格上的快速二维线性插值"""
@@ -1507,7 +1552,6 @@ def _bilinear_with_mask(a, m, xi, yi, xlog, ylog, wrap_x):
     val = a0 * (1.0 - yt) + a1 * yt
     return val, masked_corner
 
-
 def _gen_starting_points(x,y,grains):
     
     eps = np.finfo(np.float32).eps
@@ -1521,7 +1565,6 @@ def _gen_starting_points(x,y,grains):
     seed_points = np.array([list(xs), list(ys)])
     
     return seed_points.T
-
 
 def _unwrap_if_jump(lon, k=8.0):
     """
@@ -1607,7 +1650,6 @@ def _line_out_(p1, p2, threshold):
     inter1_len = ls1.intersection(buf2.context).length
     len1 = ls1.length if ls1.length > 0 else 1.0
     return inter1_len / len1
-
 
 def velovect_key(axes, quiver, shrink=0.15, U=1., angle=0., label='1', color='k', arrowstyle='v', linewidth=.5,
                  fontproperties={'size': 5}, loc="upper right", bbox_to_anchor=None, width_shrink=1., height_shrink=1.,
