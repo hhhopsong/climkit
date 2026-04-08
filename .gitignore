@@ -1,2 +1,4 @@
 /climkit.egg-info/
 /dist/
+/__pycache__/
+/climkit/__pycache__/

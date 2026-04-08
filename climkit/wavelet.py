@@ -146,7 +146,7 @@ class WaveletAnalysis:
                                                      dof=[self.scales[sel[0]], self.scales[sel[-1]]], wavelet=self.mother)
         return scale_avg_signif, scale_avg
 
-    def plot(self, unit="%", start_year=1961):
+    def plot(self, unit="%", start_year=1961, figpath=None):
         """绘制小波分析结果"""
         data = self.data
         if self.detrend:
@@ -157,23 +157,15 @@ class WaveletAnalysis:
             data = self.normalize(data)
         plt.close('all')
         plt.ioff()
-        figprops = dict(figsize=(11, 8), dpi=72)
+        figprops = dict(figsize=(16, 9), dpi=72)
         fig = plt.figure(**figprops)
+        plt.rcParams.update({'font.size': 22})
+        gs = fig.add_gridspec(1, 2, width_ratios=[2, 1], wspace=0)
         t = np.arange(0, data.size) * self.dt
         period, power, dt, mother, iwave, sig, coi, glbl_power, glbl_signif, fft_power, fft_freqs, fft_theor= self.wavelet_analysis()
 
-        # 第一个子图，原始时间序列异常和逆小波变换
-        ax = plt.axes([0.1, 0.75, 0.65, 0.2])
-        ax.plot(t, iwave / self.std, '-', linewidth=1, color=[0.5, 0.5, 0.5])
-        ax.axhline(0, color='gray', linestyle='--', linewidth=1.)
-        ax.plot(t, data, 'k', linewidth=1.5)
-        ax.set_title('a) {}'.format('Raw data'))
-        ax.set_ylabel(r'[{}]'.format(unit))
-        ax.set_xlim([t.min(), t.max()])
-        ax.set_xticks(np.arange(t.min(), t.max(), 10))
-
-        # 第二个子图，归一化小波功率谱和显著性水平等值线和虚部阴影区域。请注意，周期刻度是对数的。
-        bx = plt.axes([0.1, 0.37, 0.65, 0.28], sharex=ax)
+        # 子图，归一化小波功率谱和显著性水平等值线和虚部阴影区域。请注意，周期刻度是对数的。
+        bx = fig.add_subplot(gs[0])
         levels = [0.0625, 0.125, 0.25, 0.5, 1, 2, 4, 8, 16, 32]
         bx_fill = bx.contourf(t, np.log2(period), np.log2(power), np.log2(levels),
                     extend='both', cmap=cmaps.sunshine_9lev)
@@ -185,8 +177,9 @@ class WaveletAnalysis:
                 np.concatenate([np.log2(coi), [1e-9], np.log2(period[-1:]),
                                    np.log2(period[-1:]), [1e-9]]),
                 'k', alpha=0.3, hatch='x')
-        bx.set_title('b) Wavelet Power Spectrum ({})'.format(mother.name))
-        bx.set_ylabel('Period (years)')
+        bx.set_title('(a) Wavelet Power Spectrum ({})'.format(mother.name), loc='left')
+        bx.set_ylabel('Period')
+        bx.set_xlim([t.min(), t.max()])
         #
         try:
             Yticks = 2 ** np.arange(np.ceil(np.log2(period.min())),
@@ -195,16 +188,23 @@ class WaveletAnalysis:
             Yticks = 2 ** np.arange(0, np.ceil(np.log2(period.max())))
         bx.set_yticks(np.log2(Yticks))
         bx.set_yticklabels(Yticks)
+        from mpl_toolkits.axes_grid1.inset_locator import inset_axes
+        from matplotlib import ticker
+        cbar = inset_axes(bx, width="100%", height="4%", loc='lower center', bbox_to_anchor=(0, -0.1, 1, 1),
+                             bbox_transform=bx.transAxes, borderpad=0)
+        cbar = fig.colorbar(bx_fill, cax=cbar, orientation='horizontal', drawedges=True)
+        cbar.locator = ticker.FixedLocator(np.log2(levels))
+        cbar.set_ticklabels([f"{i}" for i in levels])
 
 
-        # 第三个子图，全局小波和傅里叶功率谱以及理论噪声谱。请注意，周期刻度是对数的。
+        # 子图，全局小波和傅里叶功率谱以及理论噪声谱。请注意，周期刻度是对数的。
         var = self.var
-        cx = plt.axes([0.77, 0.37, 0.2, 0.28], sharey=bx)
+        cx = fig.add_subplot(gs[1], sharey=bx)
         cx.plot(var * fft_power, np.log2(1. / fft_freqs), '-', color='#cccccc', linewidth=1)
         cx.plot(var * fft_theor, np.log2(period), ':', color='#cccccc')
-        cx.plot(var * glbl_power, np.log2(period), '-', color='k', linewidth=1.5)
-        cx.plot(glbl_signif, np.log2(period), ':', color='red', linewidth=1.5)
-        cx.set_title('c) Global Wavelet Spectrum')
+        cx.plot(var * glbl_power, np.log2(period), '-', color='#000000', linewidth=3)
+        cx.plot(glbl_signif, np.log2(period), ':', color='red', linewidth=3)
+        cx.set_title('(b) Wavelet Spectrum', loc='left')
         cx.set_xlabel(r'Power [({})^2]'.format(unit))
         cx.set_xlim([0, np.nanmax([glbl_signif * 1.05, var * glbl_power * 1.05])])
         cx.set_yticks(np.log2(Yticks))
@@ -214,17 +214,15 @@ class WaveletAnalysis:
             cx.set_ylim([np.log2(period.min()), np.log2(2**int(np.log2(coi.max())))+1])
         except ValueError:
             cx.set_ylim([np.log2(0), np.log2(2 ** int(np.log2(coi.max()))) + 1])
+        for ax in fig.axes:
+            # 遍历每个子图中的所有艺术家对象 (artist)
+            for spine in ax.spines.values():
+                spine.set_linewidth(3)  # 设置边框线宽
 
-        # 第四个子图，比例平均小波谱。
-        scale_avg_signif, scale_avg= self.find_periods_power(2, 8)
-        dx = plt.axes([0.1, 0.07, 0.65, 0.2], sharex=ax)
-        dx.axhline(scale_avg_signif, color='red', linestyle=':', linewidth=1.5)
-        dx.plot(t, scale_avg, 'k-', linewidth=1.5)
-        dx.set_title('d) {}-{} scale-averaged power'.format(2, 8))
-        dx.set_xlabel('Time (year)')
-        dx.set_ylabel(r'Average variance [{}]'.format(unit))
-
-        plt.show()
+        if figpath is not None:
+            plt.savefig(figpath, bbox_inches='tight', dpi=1000)
+        else:
+            plt.show()
 
 
 if __name__ == '__main__':
