@@ -1,7 +1,5 @@
 import cmaps
 import numpy as np
-import xarray as xr
-from scipy.stats.distributions import chi2
 from matplotlib import pyplot as plt
 
 import pycwt as wavelet
@@ -41,7 +39,12 @@ class WaveletAnalysis:
         self.scales = None
         self.mother = None
         self.global_power = None
-        self.alpha , _, _ = wavelet.ar1(self.data)  # 一阶滞后自相关(若较大，则说明时间连续选择红噪声检验，否则选择白噪声检验)
+        try:
+            self.alpha, _, _ = wavelet.ar1(self.data)
+        except Warning as e:
+            import warnings
+            warnings.warn(f"AR1 estimation failed: {e}; fallback to alpha=0")
+            self.alpha = 0.0  # 一阶滞后自相关(若较大，则说明时间连续选择红噪声检验，否则选择白噪声检验)
         self.wavelet_analysis()
 
     def detrended(self, data):
@@ -167,8 +170,7 @@ class WaveletAnalysis:
         ax.set_title('a) {}'.format('Raw data'))
         ax.set_ylabel(r'[{}]'.format(unit))
         ax.set_xlim([t.min(), t.max()])
-        ax.set_xticks([0, 10, 20, 30, 40, 50, 60])
-        ax.set_xticklabels(np.array([0, 10, 20, 30, 40, 50, 60]) + start_year)
+        ax.set_xticks(np.arange(t.min(), t.max(), 10))
 
         # 第二个子图，归一化小波功率谱和显著性水平等值线和虚部阴影区域。请注意，周期刻度是对数的。
         bx = plt.axes([0.1, 0.37, 0.65, 0.28], sharex=ax)
@@ -218,7 +220,7 @@ class WaveletAnalysis:
         dx = plt.axes([0.1, 0.07, 0.65, 0.2], sharex=ax)
         dx.axhline(scale_avg_signif, color='red', linestyle=':', linewidth=1.5)
         dx.plot(t, scale_avg, 'k-', linewidth=1.5)
-        dx.set_title('d) {}-{} year scale-averaged power'.format(2, 8))
+        dx.set_title('d) {}-{} scale-averaged power'.format(2, 8))
         dx.set_xlabel('Time (year)')
         dx.set_ylabel(r'Average variance [{}]'.format(unit))
 
